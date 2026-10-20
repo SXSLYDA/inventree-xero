@@ -3,7 +3,15 @@
 The shop owns the customer conversation: it emails the quote, shows it in the
 customer's account, takes acceptance and payment, and expires quotes nobody
 accepts. Xero is where you price and keep the quote. This module keeps the two
-in step:
+in step.
+
+"Price and send in Xero" (SHOP_QUOTES = xero) makes this plugin the shop's quote
+pricing provider (see inventree-woocommerce's providers.py): the shop's own
+pricing is locked, every Xero line reaches the shop - parts as part lines,
+labour / freight / anything without a part as charges - and the customer gets
+Xero's PDF. Lines are only ever written to Xero when the quote is created
+(placeholders); after that Xero's lines are left exactly as you made them.
+The other modes keep pricing in InvenTree and mirror the quote into Xero.
 
   Shop quote request                 Xero quote
   ------------------                 ----------
@@ -73,10 +81,19 @@ class ShopQuotes:
     def mode(self):
         if not self.sync.flag('SHOP_INTEGRATION'):
             return 'off'
-        return self.sync.setting('SHOP_QUOTES') or 'draft'
+        return self.sync.setting('SHOP_QUOTES') or 'xero'
 
     def available(self):
         return self.mode != 'off' and shop_models() is not None
+
+    @property
+    def prices_in_xero(self):
+        """Xero is the shop's pricing provider: Xero owns the lines."""
+        return self.mode == 'xero'
+
+    @property
+    def xero_edits(self):
+        return self.prices_in_xero or self.sync.flag('SHOP_QUOTE_XERO_EDITS')
 
     @staticmethod
     def target_status(shop_status):
@@ -96,7 +113,7 @@ class ShopQuotes:
             raise DryRunWrite(f'Dry run: would {action} shop quote {quote.reference}')
 
         try:
-            message = apply_action(quote, {'action': action, **data}, load_config())
+            message = apply_action(quote, {'action': action, **data}, load_config(), source='provider')
         except QuoteError as exc:
             raise ShopQuoteError(f'Shop refused "{action}": {exc}') from exc
         quote.refresh_from_db()
@@ -132,10 +149,10 @@ class ShopQuotes:
         positions = {item.pk: item.position for item in quote.items.all()}
         priced = list(quote.lines.all().order_by('position'))
         if priced:
-            parts = Part.objects.in_bulk([ln.part_id for ln in priced])
+            parts = Part.objects.in_bulk([ln.part_id for ln in priced if ln.part_id])
             lines = []
             for ln in priced:
-                part = parts.get(ln.part_id)
+                part = parts.get(ln.part_id) if ln.part_id else None  # no part: labour, freight...
                 desc = ln.description or (part.full_name if part else 'Item')
                 if ln.item_id in positions:
                     desc = f'Item {positions[ln.item_id]}: {desc}'
@@ -173,13 +190,17 @@ class ShopQuotes:
             'LineAmountTypes': self.sync.setting('LINE_AMOUNT_TYPES') or 'Exclusive',
             'Status': target,
         }
+        lines_owned_by_xero = self.prices_in_xero and link is not None and bool(link.xero_id)
+        if lines_owned_by_xero:
+            # Priced in Xero: only status, dates and contact go back - never lines or how they're taxed
+            del payload['LineAmountTypes']
         if quote.valid_until:
             payload['ExpiryDate'] = quote.valid_until.isoformat()
         if self.sync.flag('SEND_CURRENCY') and getattr(quote, 'currency', ''):
             payload['CurrencyCode'] = quote.currency
         # Placeholder lines go in once, on create. After that a still-unpriced shop quote leaves
         # the Xero lines alone, because that is where someone may be pricing it.
-        if lines and (not placeholder or link is None or not link.xero_id):
+        if lines and not lines_owned_by_xero and (not placeholder or link is None or not link.xero_id):
             payload['LineItems'] = lines
         return payload, lines, placeholder
 
@@ -362,10 +383,13 @@ class ShopQuotes:
         doc = self.client.get_document('quote', link.xero_id)
         return self.apply_from_xero(quote, link=link, doc=doc, force=True)
 
-    def rows_from_xero(self, quote, lines):
-        """Xero quote lines → shop set_lines rows, plus problems that stop them being applied."""
-        service = (self.sync.setting('SHOP_QUOTE_SERVICE_PART') or '').strip()
-        service_part = self.sync.items.find_part(service) if service else None
+    def rows_from_xero(self, quote, lines, inclusive=False):
+        """Xero quote lines -> shop set_lines rows, plus problems that stop them being applied.
+
+        A line whose item code is a salable InvenTree part becomes a part line; anything else (labour,
+        freight, a call-out fee...) becomes a charge with no part. Prices are what Xero will invoice: the
+        line amount after any discount, ex tax (tax-inclusive quotes have the tax taken off).
+        """
         items = {item.position: item.pk for item in quote.items.all()}
         rows, problems = [], []
         for n, ln in enumerate(lines, start=1):
@@ -373,20 +397,33 @@ class ShopQuotes:
             desc = (ln.get('Description') or '').strip()
             if qty == 0 and unit == 0:
                 continue  # heading / note
+            label = desc[:60] or (ln.get('ItemCode') or f'line {n}')
+            if ln.get('LineAmount') is not None:
+                amount = as_float(ln.get('LineAmount'))
+            else:
+                amount = qty * unit * (1 - as_float(ln.get('DiscountRate')) / 100)
+            if inclusive:
+                amount -= as_float(ln.get('TaxAmount'))
+            amount = round(amount, 2)
+            if amount < 0 or qty < 0:
+                problems.append(f'line {n} "{label}" is negative - the shop can\'t take credit lines; '
+                                f'use a discount on the line instead')
+                continue
             code = (ln.get('ItemCode') or '').strip()
             part = self.sync.items.find_part(code) if code else None
             if part is not None and not part.salable:
-                part = None
-            if part is None:
-                if service_part is not None and service_part.salable:
-                    part = service_part
-                else:
-                    problems.append(f'line {n} "{desc[:60] or code}" has no salable InvenTree part '
-                                    f'(item code {code or "missing"})')
-                    continue
-            if qty < 1 or qty != int(qty):
-                problems.append(f'line {n} "{desc[:60]}": the shop needs a whole quantity of at least 1')
+                problems.append(f'line {n} "{label}": item {code} is InvenTree part {part.name}, which isn\'t Salable - '
+                                f'mark it Salable, or take the item code off the line to quote it as a charge')
                 continue
+            if amount == 0:
+                if part is not None or ITEM_PREFIX_RE.match(desc):
+                    problems.append(f'line {n} "{label}" has no price yet - price it, or delete the line')
+                continue  # a no-charge note line ("Free delivery"): it stays on the Xero PDF only
+            whole = qty >= 1 and qty == int(qty)
+            if part is not None and not whole:
+                problems.append(f'line {n} "{label}": the shop needs a whole quantity of at least 1 for a part')
+                continue
+
             item_id = None
             match = ITEM_PREFIX_RE.match(desc)
             if match:
@@ -397,8 +434,17 @@ class ShopQuotes:
             if match:
                 lead_time = match.group(1).strip()
                 desc = desc[:match.start()]
-            row = {'part_id': part.pk, 'quantity': int(qty), 'unit_price': f'{unit:.4f}',
-                   'description': desc.strip()[:250], 'lead_time': lead_time[:60]}
+            desc = desc.strip()
+            if part is None and not desc:
+                desc = code or 'Charge'
+            if whole:
+                quantity, unit_price = int(qty), amount / int(qty)
+            else:
+                # e.g. 1.5 hours of labour: one line for the amount, the hours in its description
+                quantity, unit_price = 1, amount
+                desc = f'{desc} ({qty:g} x {unit:.2f})'
+            row = {'part_id': part.pk if part else None, 'quantity': quantity, 'unit_price': f'{unit_price:.4f}',
+                   'description': desc[:250], 'lead_time': lead_time[:60]}
             if item_id:
                 row['item_id'] = item_id
             rows.append(row)
@@ -412,12 +458,13 @@ class ShopQuotes:
 
         done = []
         problems = []
-        if self.sync.flag('SHOP_QUOTE_XERO_EDITS'):
+        if self.xero_edits:
             editable = quote.status in SHOP_OPEN or quote.status == 'quoted'
             lines_changed = lines_signature(info['lines']) != link.xero_sig
             revised = False
             if lines_changed and editable:
-                rows, problems = self.rows_from_xero(quote, info['lines'])
+                rows, problems = self.rows_from_xero(quote, info['lines'],
+                                                     inclusive=doc.get('LineAmountTypes') == 'Inclusive')
                 if rows and not problems:
                     if quote.status == 'quoted':
                         self.shop_action(quote, 'reopen')
@@ -462,7 +509,7 @@ class ShopQuotes:
         elif done:
             self.sync.log('info', 'import', 'quote', 'update', f'Xero {info["number"]} → quote {quote.reference}: '
                           + ', '.join(done), ref=quote.reference, xero_id=info['id'], number=info['number'])
-        if self.sync.flag('SHOP_QUOTE_XERO_EDITS') and not problems and quote.status in SHOP_OPEN \
+        if self.xero_edits and not problems and quote.status in SHOP_OPEN \
                 and info['status'] == 'SENT':
             # Revised in Xero after it was sent: put the Xero quote back to Draft; marking it Sent again
             # is the deliberate step that sends the revision to the customer.
@@ -473,3 +520,42 @@ class ShopQuotes:
                           number=info['number'])
             done.append('waiting for you to mark it Sent again')
         return ', '.join(done) or 'no change for the shop'
+
+
+# ---------------------------------------------------------------- the shop's quote pricing provider
+# inventree-woocommerce looks for these on any active plugin (its providers.py); XeroPlugin passes them on.
+
+def provider_details(plugin):
+    """Are the shop's quotes priced in Xero right now? None = no, the shop prices them itself."""
+    from InvenTree.helpers import str2bool
+
+    from .models import XeroConnection
+
+    if not str2bool(plugin.get_setting('SHOP_INTEGRATION')) or plugin.get_setting('SHOP_QUOTES') != 'xero':
+        return None
+    if plugin.get_setting('WRITE_MODE') == 'dry_run':
+        return None  # Xero changes never reach the shop in a dry run: price in InvenTree meanwhile
+    if not XeroConnection.get_solo().is_connected:
+        return None
+    return {'name': 'Xero', 'partial_accept': str2bool(plugin.get_setting('SHOP_QUOTE_PARTIAL_ACCEPT')), 'pdf': True}
+
+
+def provider_info(plugin, quote):
+    from .models import XeroQuoteLink
+
+    link = XeroQuoteLink.objects.filter(quote_request_id=quote.pk).first()
+    if link is None:
+        return None
+    return {'number': link.number, 'status': link.status, 'url': link.url, 'error': link.error}
+
+
+def provider_pdf(plugin, quote):
+    """(pdf bytes, file name) of the Xero quote, or None if it isn't in Xero (the shop's own PDF is used)."""
+    from . import sync as sync_module
+    from .models import XeroQuoteLink
+
+    link = XeroQuoteLink.objects.filter(quote_request_id=quote.pk).first()
+    if link is None or not link.xero_id:
+        return None
+    data = sync_module.XeroClient(plugin).get_pdf('quote', link.xero_id)
+    return data, f'{link.number or quote.reference}.pdf'

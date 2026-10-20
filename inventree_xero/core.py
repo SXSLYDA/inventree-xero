@@ -398,20 +398,32 @@ class XeroPlugin(AppMixin, EventMixin, ScheduleMixin, SettingsMixin, UrlsMixin, 
         },
         'SHOP_QUOTES': {
             'name': 'Web shop quote requests',
-            'description': 'Keep the shop\'s quote requests as Xero quotes',
+            'description': ('Price in Xero: each request becomes a draft Xero quote; price it there (parts, labour, '
+                            'freight - any line), mark it Sent and the shop sends the customer Xero\'s PDF. The shop\'s '
+                            'own pricing is locked meanwhile (back to InvenTree pricing in a dry run or if '
+                            'disconnected). The other choices price in InvenTree and copy the quote to Xero'),
             'choices': [
-                ('draft', 'Draft in Xero as soon as a request arrives (price it in Xero or the shop)'),
-                ('sent', 'Only once the quote is sent to the customer'),
+                ('xero', 'Price and send in Xero (Xero is the quote)'),
+                ('draft', 'Priced in InvenTree, draft in Xero as soon as a request arrives'),
+                ('sent', 'Priced in InvenTree, into Xero once it is sent to the customer'),
                 ('off', 'Off'),
             ],
-            'default': 'draft',
+            'default': 'xero',
         },
         'SHOP_QUOTE_XERO_EDITS': {
             'name': 'Xero quote edits go to the shop',
-            'description': ('Line changes in Xero update the shop quote; marking it Sent sends it to the customer; '
-                            'Draft reopens it; Declined declines it (Summary = reason)'),
+            'description': ('Only when priced in InvenTree (always on with "Price and send in Xero"): line changes in '
+                            'Xero update the shop quote; marking it Sent sends it to the customer; Draft reopens it; '
+                            'Declined declines it (Summary = reason)'),
             'validator': bool,
             'default': True,
+        },
+        'SHOP_QUOTE_PARTIAL_ACCEPT': {
+            'name': 'Customers can accept part of a Xero quote',
+            'description': ('Only with "Price and send in Xero". Off (recommended): customers accept the whole quote, '
+                            'so the order always matches the Xero quote'),
+            'validator': bool,
+            'default': False,
         },
         'SHOP_QUOTE_AUTO_RESEND': {
             'name': 'Re-send revised quotes automatically',
@@ -419,12 +431,6 @@ class XeroPlugin(AppMixin, EventMixin, ScheduleMixin, SettingsMixin, UrlsMixin, 
                             'again is what sends the revision to the customer'),
             'validator': bool,
             'default': False,
-        },
-        'SHOP_QUOTE_SERVICE_PART': {
-            'name': 'Part for non-part quote lines',
-            'description': ('Salable part (name or IPN) used for Xero quote lines with no part - labour, freight - '
-                            'so the customer can accept them in the shop. Blank = such lines stop the update'),
-            'default': '',
         },
         'SHOP_QUOTE_DECLINE_REASON': {
             'name': 'Default decline reason',
@@ -595,6 +601,23 @@ class XeroPlugin(AppMixin, EventMixin, ScheduleMixin, SettingsMixin, UrlsMixin, 
         sync.export_single(kind, pk)
         if event == 'purchaseorder.completed' and self.get_setting('BILLS_MODE') != 'off':
             sync.export_single('bill', pk)
+
+    # ------------------------------------------------------------------ web shop quote pricing
+    # The inventree-woocommerce plugin looks for these hooks on active plugins (its providers.py)
+    def woocommerce_quote_provider(self):
+        from .shop_quotes import provider_details
+
+        return provider_details(self)
+
+    def woocommerce_quote_info(self, quote):
+        from .shop_quotes import provider_info
+
+        return provider_info(self, quote)
+
+    def woocommerce_quote_pdf(self, quote):
+        from .shop_quotes import provider_pdf
+
+        return provider_pdf(self, quote)
 
     # ------------------------------------------------------------------ URLs
     def setup_urls(self):

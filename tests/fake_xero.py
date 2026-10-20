@@ -80,6 +80,11 @@ class FakeXeroClient(XeroClient):
 
     def _finish(self, doc):
         doc['LineItems'] = self._lines(doc.get('LineItems'))
+        amounts = doc.get('LineAmountTypes') or 'Exclusive'
+        for line in doc['LineItems']:
+            rate = 0 if amounts == 'NoTax' or line.get('TaxType') in ('EXEMPTOUTPUT', 'BASEEXCLUDED') else 10
+            amount = line['LineAmount']
+            line['TaxAmount'] = round(amount * rate / (100 + rate) if amounts == 'Inclusive' else amount * rate / 100, 2)
         total = round(sum(ln['LineAmount'] for ln in doc['LineItems']), 2)
         doc['SubTotal'] = doc['Total'] = total
         paid = float(doc.get('AmountPaid') or 0)
@@ -134,6 +139,17 @@ class FakeXeroClient(XeroClient):
             self.drop_after_commit -= 1
             raise requests.ConnectionError('connection reset after the request was processed')
         return 200, {}, payload
+
+    def _http_raw(self, method, url, headers=None):
+        """PDFs: GET Quotes/{id} (or any document) with Accept: application/pdf."""
+        headers = headers or {}
+        self.headers_seen.append((method, url, dict(headers)))
+        parts = url[len(API_BASE) + 1:].split('/')
+        doc = self.store.get(parts[0], {}).get(parts[1]) if len(parts) == 2 else None
+        if method != 'GET' or headers.get('Accept') != 'application/pdf' or doc is None:
+            return 404, {}, b'{"Message": "not found"}'
+        number = doc.get('QuoteNumber') or doc.get('InvoiceNumber') or doc.get('PurchaseOrderNumber') or ''
+        return 200, {'Content-Type': 'application/pdf'}, f'%PDF-1.4 fake Xero {number} {doc.get("Total")}'.encode()
 
     def time_sleep(self, *_):
         return None

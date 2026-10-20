@@ -17,7 +17,7 @@ Every feature can be switched on or off in the plugin settings.
 - Lines in Xero that aren't parts stay in Xero. Labour, freight, account interest, call-out fees and so on are never imported into InvenTree.
 - Those lines are preserved whenever InvenTree updates the Xero document. See [Lines that live only in Xero](#lines-that-live-only-in-xero).
 
-Requires **InvenTree 1.6** or later. Tested end to end against InvenTree 1.6.0, with inventree-woocommerce 0.4.1. Before going live, prove it against your own Xero Demo Company with the built-in live self-test.
+Requires **InvenTree 1.6** or later. Tested end to end against InvenTree 1.6.0, with inventree-woocommerce 0.6.0 (quote pricing in Xero needs 0.6.0+). Before going live, prove it against your own Xero Demo Company with the built-in live self-test.
 
 ---
 
@@ -225,22 +225,39 @@ The shop's quote requests (custom harnesses, copies, components) live in Xero as
 | Accepted (paid or charged to account) | **Accepted**, then **Invoiced** once its sales order is invoiced |
 | Declined / expired / cancelled | **Declined** |
 
-**Pricing in Xero.**
-1. Give each placeholder line an item code (a salable InvenTree part) and a price.
-2. Keep the `Item 1:` prefix so the line stays tied to the customer's item.
-3. Add a lead time as ` (lead time 6 weeks)` at the end of the description.
-4. The lines are copied into the shop quote on the next sync.
-5. **Mark the quote Sent in Xero** and the shop sends it to the customer for approval. The validity comes from the Xero expiry date.
+*Web shop quote requests* picks where quotes are priced:
 
-You can also price and send it in the shop's Quote Requests widget, and Xero follows.
+| Setting | Priced in | Customer's PDF | Lines written to Xero |
+|---|---|---|---|
+| **Price and send in Xero** (default) | Xero - the shop's pricing is locked | Xero's | Only the placeholders, once |
+| Priced in InvenTree, draft in Xero | the shop's Quote Requests widget (or Xero) | InvenTree's | Every change |
+| Priced in InvenTree, into Xero once sent | the shop's widget | InvenTree's | Every change after sending |
+
+**Price and send in Xero.** Xero is the quote; the shop is how the customer gets it.
+1. Each request arrives in Xero as a Draft with one `Item 1:` placeholder line per requested item.
+2. Price it in Xero the way you price anything: item codes, discounts, tax-inclusive or exclusive, your own account codes and tax rates. Add labour, freight, a call-out fee - any line.
+3. Keep the `Item 1:` prefix to tie a line to the customer's item, and add a lead time as ` (lead time 6 weeks)` at the end of the description (both optional).
+4. **Mark the quote Sent in Xero.** The shop emails the customer with Xero's PDF attached; the validity comes from the Xero expiry date.
+5. The customer accepts the whole quote online and pays or charges it to account. (*Customers can accept part of a Xero quote* allows ticking lines instead.)
+
+How Xero lines reach the shop:
+- An item code that's a salable InvenTree part → a part line (Sales Order line, stock and build orders as usual). A code that's an InvenTree part but not Salable stops the update until you fix it.
+- Anything else (labour, freight...) → a charge: a fee on the WooCommerce order, an extra line on the Sales Order.
+- Prices are what Xero invoices: after discount, ex tax (a tax-inclusive quote has its tax taken off). Part quantities must be whole; fractional charges (1.5 hours) become one line for the amount, with the hours in the description.
+- A placeholder or part line still at zero stops the update (it's shown on the quote and retried). A no-charge note line ("Free delivery") stays on the Xero PDF only.
+- After the quote is created, nothing is written over its lines: only status, expiry and contact go back to Xero.
+
+The shop's Quote Requests widget shows "Priced in Xero" with the quote number and a link, and keeps samples, calls, notes and declining. In a dry run, or when Xero isn't connected, quotes are priced in the shop until it's back (nothing from Xero could reach the shop meanwhile).
+
+**Priced in InvenTree.** Price and send in the shop's widget and Xero follows. With *Xero quote edits go to the shop* on, Xero edits flow back the same way as above.
 
 **What if the customer doesn't approve?**
-- **They want changes:** edit the quote in Xero, even after it's been sent. The shop reopens the quote, which cancels the customer's pending payment link, updates the lines and sends the revised quote. Marking it Draft in Xero just reopens it.
+- **They want changes:** edit the quote in Xero, even after it's been sent. The shop reopens the quote, which cancels the customer's pending payment link, and updates the lines. The Xero quote goes back to Draft; mark it Sent again to send the revision (or turn on *Re-send revised quotes automatically*). Marking it Draft in Xero just reopens it.
 - **You decline it:** mark it Declined in Xero with the reason in the quote's *Summary*; the customer is told that reason. Or decline it in the shop, and Xero follows.
 - **They never answer:** the shop reminds them before the quote expires, then expires it. The Xero quote becomes Declined.
-- **They accept only some lines:** the sales order and invoice carry just those lines. The Xero quote is marked Accepted, then Invoiced.
+- **They accept only some lines** (only when partial acceptance is allowed): the sales order and invoice carry just those lines. The Xero quote is marked Accepted, then Invoiced.
 
-**Lines without a part** (labour, a site visit) can't go on a shop quote, because the customer accepts and pays for parts. Either set *Part for non-part quote lines* to a salable service part (e.g. `LABOUR`), or remove the line. Until then the update is held and the problem is shown on the quote, and it's retried once fixed.
+**Other accounting plugins.** The shop finds its pricing provider through three duck-typed hooks (`woocommerce_quote_provider`, `woocommerce_quote_info`, `woocommerce_quote_pdf`) - see inventree-woocommerce's `providers.py`. This plugin's are in `core.py` and `shop_quotes.py`; copy them to make another accounting system the quote.
 
 **Credit checks.** With *Import account balances* on, each linked customer's Xero receivables are stored on the company: outstanding and overdue. That data is described under [For other plugins](#for-other-plugins). It's also written to the company parameter *Balance parameter* (default `Xero Outstanding`).
 

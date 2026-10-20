@@ -320,9 +320,9 @@ NOTIFICATIONS = []
 _real_apply_action = shop_quotes_mod.apply_action
 
 
-def recording_apply_action(quote, data, config):
+def recording_apply_action(quote, data, config, source='staff'):
     ACTIONS.append((quote.reference, data.get('action'), data))
-    return _real_apply_action(quote, data, config)
+    return _real_apply_action(quote, data, config, source=source)
 
 
 shop_quotes_mod.apply_action = recording_apply_action
@@ -331,6 +331,7 @@ shop_link.send_notification = lambda event, payload: NOTIFICATIONS.append((event
 
 class FakeWoo:
     calls = []
+    posted = []
     next_id = 900
 
     @classmethod
@@ -345,6 +346,7 @@ class FakeWoo:
 
     def post(self, path, data):
         FakeWoo.calls.append(('post', path))
+        FakeWoo.posted.append((path, data))
         FakeWoo.next_id += 1
         return {'id': FakeWoo.next_id}
 
@@ -409,19 +411,16 @@ check('revision: shop reopens, updates and re-sends', [a[1] for a in ACTIONS[bef
       ACTIONS[before:])
 check('customer sees the revised price', qr.status == 'quoted' and qr.lines.order_by('position').first().unit_price == Decimal('1400'))
 
-# A labour line with no part blocks the update until it has one
+# A labour line with no part reaches the shop as a charge (no part needed)
 fake.edit_in_xero('Quotes', link.xero_id, LineItems=fake.store['Quotes'][link.xero_id]['LineItems']
                   + [{'Description': 'Site visit labour', 'Quantity': 1, 'UnitAmount': 180}])
 run('import')
 link.refresh_from_db()
 qr.refresh_from_db()
-check('non-part quote line flagged, shop left alone', 'no salable InvenTree part' in link.error and qr.lines.count() == 2, link.error)
-Part.objects.create(name='LABOUR', description='Labour / service', salable=True)
-plugin.set_setting('SHOP_QUOTE_SERVICE_PART', 'LABOUR')
-ok, message = XeroSync(plugin, client=fake).shop_quotes.safe(XeroSync(plugin, client=fake).shop_quotes.pull, qr)
-link.refresh_from_db()
-qr.refresh_from_db()
-check('with a service part the labour line reaches the shop', ok and qr.lines.count() == 3 and not link.error, message)
+labour = qr.lines.order_by('position').last()
+check('labour line with no part reaches the shop as a charge',
+      qr.lines.count() == 3 and labour.part_id is None and labour.unit_price == Decimal('180') and not link.error,
+      (link.error, [(l.part_id, l.description) for l in qr.lines.all()]))
 
 # Changed in the shop widget instead -> Xero follows
 cfg = shop_config()
@@ -522,6 +521,93 @@ check('shop credit used = Xero balance + open orders not yet invoiced', used == 
 check('without Xero the shop falls back to open account orders', credit_used(customer.pk, 'AUD', include_xero=False) == Decimal('3355.40'),
       credit_used(customer.pk, 'AUD', include_xero=False))
 check('shop refreshes customer credit when Xero balances change', shop_plugin.wants_process_event('xero.balances_updated'))
+
+# ------------------------------------------------------------------ "Price and send in Xero": Xero is the shop's quote
+from inventree_woocommerce.providers import active_provider  # noqa: E402
+from inventree_woocommerce.quote_pdf import quote_pdf as shop_quote_pdf  # noqa: E402
+from inventree_woocommerce.quotes import QuoteError  # noqa: E402
+
+plugin.set_setting('SHOP_QUOTES', 'xero')
+provider = active_provider(shop_config())
+check('Xero is the shop\'s quote pricing provider', provider is not None and provider.name == 'Xero'
+      and provider.partial_accept is False)
+qx = QuoteRequest.objects.create(reference='QR-261021-XR01', woo_customer_id=77, company_id=customer.pk, name='Sam',
+                                 email='sam@mine.example')
+QuoteItem.objects.create(request=qx, position=1, kind='copy', description='Engine harness copy', quantity=2)
+QuoteItem.objects.create(request=qx, position=2, kind='custom', description='Light bar loom', quantity=1)
+plugin.process_event('woocommerce.quote_received', id=qx.pk, reference=qx.reference)
+linkx = XeroQuoteLink.objects.get(quote_request_id=qx.pk)
+check('request lands in Xero as a draft with placeholders', fake.store['Quotes'][linkx.xero_id]['Status'] == 'DRAFT'
+      and len(fake.store['Quotes'][linkx.xero_id]['LineItems']) == 2)
+detail = client.get(f'/plugin/woocommerce/quotes/{qx.pk}/').json()
+check('shop panel says where it is priced', detail['pricing']['name'] == 'Xero'
+      and detail['pricing']['info']['number'] == linkx.number and detail['pricing']['info']['url'] == linkx.url,
+      detail.get('pricing'))
+try:
+    shop_quotes_mod.apply_action(qx, {'action': 'set_lines', 'lines': []}, shop_config())
+    locked = False
+except QuoteError as exc:
+    locked = 'priced in Xero' in str(exc)
+check('pricing in the shop panel is locked', locked)
+
+# Price it in Xero, tax-inclusive, with a discount, labour by the hour, freight, a no-charge note - and item 2 left unpriced
+placeholder_2 = fake.store['Quotes'][linkx.xero_id]['LineItems'][1]
+xero_lines = [
+    {'ItemCode': 'HAR-R1300G-01', 'Description': 'Item 1: Engine harness copy (lead time 4 weeks)', 'Quantity': 2,
+     'UnitAmount': 1650, 'DiscountRate': 10, 'TaxType': 'OUTPUT', 'AccountCode': '200'},
+    {'Description': 'Site labour', 'Quantity': 1.5, 'UnitAmount': 132, 'TaxType': 'OUTPUT', 'AccountCode': '200'},
+    {'Description': 'Freight to Kalgoorlie', 'Quantity': 1, 'UnitAmount': 55, 'TaxType': 'OUTPUT', 'AccountCode': '425'},
+    {'Description': 'Free delivery on your next order', 'Quantity': 1, 'UnitAmount': 0},
+]
+fake.edit_in_xero('Quotes', linkx.xero_id, LineAmountTypes='Inclusive', LineItems=xero_lines + [placeholder_2])
+run('import')
+linkx.refresh_from_db()
+check('an unpriced placeholder stops the update', 'has no price yet' in linkx.error and qx.lines.count() == 0, linkx.error)
+fake.edit_in_xero('Quotes', linkx.xero_id, LineItems=xero_lines)
+run('import')
+linkx.refresh_from_db()
+rows = [(l.part_id, l.description, l.quantity, l.unit_price, l.lead_time) for l in qx.lines.order_by('position')]
+check('Xero lines reach the shop ex tax, after discount - parts as parts, the rest as charges', rows == [
+    (harness.pk, 'Engine harness copy', 2, Decimal('1350.00'), '4 weeks'),
+    (None, 'Site labour (1.5 x 132.00)', 1, Decimal('180.00'), ''),
+    (None, 'Freight to Kalgoorlie', 1, Decimal('50.00'), ''),
+] and not linkx.error, (rows, linkx.error))
+
+fake.edit_in_xero('Quotes', linkx.xero_id, Status='SENT', ExpiryDate=(today + timedelta(days=10)).isoformat())
+run('import')
+qx.refresh_from_db()
+check('marked Sent in Xero → the customer gets it, with item 2 covered by the quote as it stands',
+      qx.status == 'quoted' and ('quote_sent', qx.reference) in NOTIFICATIONS
+      and not qx.items.filter(state='open').exists(), (qx.status, list(qx.items.values_list('state', flat=True))))
+before_lines = [dict(ln) for ln in fake.store['Quotes'][linkx.xero_id]['LineItems']]
+sync, _ = run('export')
+check('nothing of the shop\'s is written back over the Xero quote',
+      fake.store['Quotes'][linkx.xero_id]['LineItems'] == before_lines
+      and fake.store['Quotes'][linkx.xero_id]['LineAmountTypes'] == 'Inclusive')
+pdf, name = shop_quote_pdf(qx, shop_config())
+check('the customer\'s PDF is Xero\'s', pdf.startswith(b'%PDF-1.4 fake Xero ' + linkx.number.encode())
+      and name == f'{linkx.number}.pdf', (pdf[:60], name))
+check('the PDF was asked for as a PDF', any(h.get('Accept') == 'application/pdf' for _, _, h in fake.headers_seen))
+
+FakeWoo.posted.clear()
+first_line = qx.lines.order_by('position').first()
+shop_quotes_mod.accept(77, qx.reference, [first_line.pk], shop_config())
+order = [data for path, data in FakeWoo.posted if path == 'orders'][-1]
+check('accepting takes the whole Xero quote: part line plus labour and freight as fees',
+      len(order['line_items']) == 1 and order['line_items'][0]['total'] == '2700.00'
+      and [(f['name'], f['total']) for f in order['fee_lines']] == [('Site labour (1.5 x 132.00)', '180.00'),
+                                                                   ('Freight to Kalgoorlie', '50.00')], order)
+QuoteRequest.objects.filter(pk=qx.pk).update(status='accepted')
+plugin.process_event('woocommerce.quote_accepted', id=qx.pk, reference=qx.reference)
+xq = fake.store['Quotes'][linkx.xero_id]
+check('accepted in the shop → Xero quote Accepted, its lines untouched', xq['Status'] == 'ACCEPTED'
+      and xq['LineItems'] == before_lines)
+
+plugin.set_setting('WRITE_MODE', 'dry_run')
+check('dry run: the shop prices quotes itself (Xero changes could not reach it)', active_provider(shop_config()) is None)
+plugin.set_setting('WRITE_MODE', 'live')
+plugin.set_setting('SHOP_QUOTES', 'draft')
+check('priced in InvenTree when another mode is chosen', active_provider(shop_config()) is None)
 
 # ================================================================== 10. Event wiring (InvenTree 1.6 names)
 from order.events import PurchaseOrderEvents, SalesOrderEvents  # noqa: E402

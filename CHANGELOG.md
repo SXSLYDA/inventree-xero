@@ -4,6 +4,15 @@ Add notes for the next release under **Unreleased** as you work. `build-and-bump
 
 ## Unreleased
 
+Needs inventree-woocommerce 0.6.0 or later. Release as a minor version (`.\build-and-bump.ps1 -Bump minor`). No new migrations.
+
+- **Price and send in Xero** (new default for *Web shop quote requests*): this plugin becomes the shop's quote pricing provider. The shop's own pricing is locked, staff see "Priced in Xero" with the quote number and link, customers get **Xero's PDF**, and accept the whole quote (setting *Customers can accept part of a Xero quote*). Once created, the Xero quote's lines, discounts, tax rates and accounts are never written over - only status, expiry and contact.
+- **Labour, freight and other lines with no part** reach the shop as charges (WooCommerce fees, Sales Order extra lines). *Part for non-part quote lines* (`SHOP_QUOTE_SERVICE_PART`) is removed.
+- Xero line prices reach the shop **after discount and ex tax** (tax-inclusive quotes have the tax taken off). Fractional charges (1.5 hours) become one line for the amount.
+- Unpriced placeholder lines, and item codes for InvenTree parts that aren't Salable, stop the update with a message instead of going to the customer.
+- `XeroClient.get_pdf()`; the Demo Company self-test downloads a quote PDF.
+- Upgrading: if you chose a *Web shop quote requests* option before, it stays; pick *Price and send in Xero* to use it.
+
 ## 1.4.1 — 2026-10-20
 
 - **Release tooling:**

@@ -15,7 +15,7 @@ A step-by-step path from nothing installed to running live against your real Xer
 | **Email** set up in InvenTree | alerts about errors and held documents | send yourself a test notification |
 | A **database backup** you know how to restore | normal caution before adding any plugin | `invoke backup` (or your own backup) and a test restore |
 | A Xero login with **adviser / standard** access to the organisation | to create the app and approve the connection | — |
-| (Optional) the **inventree-woocommerce** plugin 0.4.1+ | web orders, quote requests and credit checks | Admin Center → Plugins |
+| (Optional) the **inventree-woocommerce** plugin 0.6.0+ | web orders, quote requests and credit checks | Admin Center → Plugins |
 
 Write down InvenTree's `SECRET_KEY` location (in `config.yaml` or `INVENTREE_SECRET_KEY`). Xero tokens are encrypted with a key derived from it. If it ever changes, you just reconnect to Xero.
 
@@ -51,7 +51,7 @@ The script:
 - runs `invoke update` (install, migrations, static files);
 - restarts InvenTree and confirms the version that installed.
 
-If you use the shop plugin, add its line to `plugins.txt` by hand first, e.g. `inventree-woocommerce @ git+https://github.com/SXSLYDA/inventree-woocommerce.git@v0.4.1`.
+If you use the shop plugin, add its line to `plugins.txt` by hand first, e.g. `inventree-woocommerce @ git+https://github.com/SXSLYDA/inventree-woocommerce.git@v0.6.0`.
 
 **Docker:** add `inventree-xero @ git+https://github.com/SXSLYDA/inventree-xero.git@vX.Y.Z` (the newest release tag on GitHub) to `plugins.txt` in your data volume, run `docker compose run --rm inventree-server invoke update`, then restart the stack.
 
@@ -77,7 +77,7 @@ Open the plugin's settings. Leave **Safety** settings at their defaults. **Write
 | Alert emails | who should hear about errors and held documents |
 | Purchase orders / Sales orders | *Two-way* (status comes back from Xero; new Xero documents are not imported unless you allow it) |
 | Create bills | *Off* for now. You'll turn it on in stage 6. |
-| Web shop quote requests | *Draft in Xero as soon as a request arrives* if you price quotes in Xero; otherwise *Only once the quote is sent* |
+| Web shop quote requests | *Price and send in Xero* if you price quotes in Xero (customers get Xero's PDF; labour and freight lines go through); otherwise one of the *Priced in InvenTree* options |
 
 Everything else can stay at its default. The full list is in [SETTINGS.md](SETTINGS.md).
 
@@ -133,7 +133,7 @@ Switch **Write mode** to **Live** on the settings panel; it asks you to confirm.
 | A | *Purchase orders* (already on) | Placed POs appear as **Draft** POs. Approve them in Xero as you normally would; that's what emails the supplier. |
 | B | *Create bills*: **As stock is received** | Draft bills appear and grow as you receive stock. Add the supplier's invoice number and freight in Xero, then approve. Those Xero lines are kept. |
 | C | *Sales orders* (already on) | Issued sales orders appear as **Draft** invoices. Approve in Xero when you invoice. |
-| D | Web shop orders and quote requests | Web orders become draft invoices. Quote requests appear as draft quotes; marking one Sent in Xero sends it to the customer. |
+| D | Web shop orders and quote requests | Web orders become draft invoices. Quote requests appear as draft quotes; marking one Sent in Xero sends it to the customer with Xero's PDF. Check one quote with labour/freight and a discount end to end, and compare the shop's prices with Xero's. |
 
 After each phase, run **Check configuration** and look at the held list and the **Recent writes to Xero** table on the settings panel.
 
@@ -224,6 +224,7 @@ inventree-xero LIVE self-test (Xero Demo Company)
 [PASS] Bill: approve: now AUTHORISED
 [PASS] Quote: create Draft: QU-... created as Draft with reference, title and expiry
 [PASS] Quote: mark Sent: now SENT
+[PASS] Quote: PDF (what the shop emails customers): Xero printed it (.. KB) - the shop sends customers this PDF
 [PASS] Quote: Sent back to Draft (revision): now DRAFT - revised quotes can go back to Draft, as the plugin expects
 [PASS] Quote: Sent again: now SENT
 [PASS] Quote: accept: now ACCEPTED

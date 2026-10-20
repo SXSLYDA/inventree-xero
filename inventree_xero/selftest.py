@@ -394,6 +394,12 @@ class SelfTest:
             return
         self.step('Quote: mark Sent', lambda: self._status('Quotes', 'QuoteID', quote, 'SENT'))
 
+        def pdf():
+            data = self.client.get_pdf('quote', quote['QuoteID'])
+            return f'Xero printed it ({len(data) // 1024} KB) - the shop sends customers this PDF'
+
+        self.step('Quote: PDF (what the shop emails customers)', pdf)
+
         def back_to_draft():
             result = self._status('Quotes', 'QuoteID', quote, 'DRAFT')
             return result + ' - revised quotes can go back to Draft, as the plugin expects'

@@ -7,7 +7,7 @@ Everything needed to pick this project up cold: what it does, how it's built, wh
 - **Feature complete** for purchase orders, bills, sales invoices/quotes, contacts, balances, items, and the inventree-woocommerce web shop (orders, quote requests, credit).
 - **Safe mode** (1.3) on by default: dry run, drafts only, no delete/void, pre-send checks, strict contact matching, idempotency keys, audit, alerts, encrypted tokens, least-privilege scopes.
 - **Tested against:**
-  - real InvenTree 1.6.0, end to end (144 checks), with the real inventree-woocommerce 0.4.1 installed;
+  - real InvenTree 1.6.0, end to end (157 checks), with the real inventree-woocommerce 0.6.0 installed;
   - unit tests and UI render tests.
 - **Not yet run against the real Xero API.** All Xero behaviour has been tested against `tests/fake_xero.py`, which models Xero's documented behaviour. The live self-test (`selftest.py`) exists to close that gap. Run it against a Demo Company before going live (see [IMPLEMENTATION.md](IMPLEMENTATION.md), stage 4) and fix any FAIL it reports.
 
@@ -15,8 +15,8 @@ Everything needed to pick this project up cold: what it does, how it's built, wh
 |---|---|---|
 | inventree-xero | 1.4.1 | this repo; version lives in `inventree_xero/version.py` |
 | InvenTree | 1.6.0+ | uses line `discount` (1.6), FSM order transitions, 1.6 event names |
-| inventree-woocommerce | 0.4.1+ | optional; 0.4.1 reads Xero balances for credit |
-| inventree-shop (WordPress) | 0.3.0 | unchanged by this plugin |
+| inventree-woocommerce | 0.6.0+ | optional; reads Xero balances for credit; 0.6.0 added the quote provider hooks and part-less quote lines |
+| inventree-shop (WordPress) | 0.4.1+ | hides line tick-boxes for whole-quote acceptance |
 | Xero API | Accounting 2.0, granular OAuth scopes | apps created after 2 Mar 2026 must use granular scopes |
 
 ## Module map
@@ -93,6 +93,9 @@ Shop quote links live in `XeroQuoteLink` (keyed by the shop's `QuoteRequest` id)
 - Shop status → Xero status mapping, with placeholder lines for unpriced requests.
 - Xero edits go back through `apply_action`, so they get the shop's own checks and customer emails.
 - A revised sent quote returns to Draft. Marking it Sent sends it.
+- *Price and send in Xero*: this plugin is the shop's **quote pricing provider** (hooks `woocommerce_quote_provider/_info/_pdf` on `XeroPlugin`, logic in `shop_quotes.provider_*`). The shop locks its own pricing and serves Xero's PDF (`XeroClient.get_pdf`, falling back to the shop's PDF if Xero fails). Lines are written to Xero only on create (placeholders); afterwards `build_payload` sends status/expiry/contact only, so discounts, tax rates and accounts set in Xero survive.
+- Xero → shop lines (`rows_from_xero`): salable part codes → part lines, everything else → charges (no part). Prices = `LineAmount` (after discount) minus `TaxAmount` for Inclusive quotes. Zero-priced placeholders/part lines block; zero notes are skipped.
+- The provider is inactive in a dry run or when disconnected, so the shop falls back to pricing in InvenTree rather than getting stuck.
 
 **Balances**
 - Receivable/payable outstanding and overdue per linked company, refreshed hourly (new links immediately).
@@ -119,6 +122,7 @@ Shop quote links live in `XeroQuoteLink` (keyed by the shop's `QuoteRequest` id)
 
 Covered by the **live self-test** (each is a named step in its report):
 - PO/invoice/bill/quote creation as Draft; status transitions, including **quote Sent → Draft** and Accepted → Invoiced, and PO refusing to move backwards
+- quote PDF download (`Accept: application/pdf`)
 - line replacement on update, and Xero-only line preservation via `LineItemID`
 - `DiscountRate` honoured on PO, invoice and bill lines
 - `Idempotency-Key` honoured (no duplicate on a repeated create)
@@ -138,6 +142,7 @@ Still manual / unverified:
 - Granular scope names `accounting.settings.read` / `accounting.contacts.read` for apps created after March 2026. If Xero rejects one at connect time, set the *OAuth scopes* setting by hand.
 - How long Xero retains idempotency keys (the per-day create key assumes at least minutes to hours).
 - Rate-limit header names (`Retry-After`, `X-Rate-Limit-Problem`).
+- Per-line `TaxAmount` on tax-inclusive quotes as the fake models it (line amount × rate / (100 + rate)). Price one Inclusive quote with a discount and compare the shop's ex-tax line with Xero's before relying on it.
 
 When the self-test reports a FAIL, fix the plugin, add the real behaviour to `tests/fake_xero.py` so the fake stays honest, and re-run.
 
@@ -156,7 +161,7 @@ When the self-test reports a FAIL, fix the plugin, add the real behaviour to `te
 |---|---|---|
 | Unit | pure helpers, safety rules, crypto, scopes, idempotency keys | `pip install -e . pytest && pytest tests/test_mapping.py tests/test_safety.py` |
 | UI | renders every panel in jsdom with InvenTree's legacy entry convention | `npm install --no-save jsdom@24 && node --test tests/ui.test.mjs` |
-| End to end | real InvenTree DB + real inventree-woocommerce + fake Xero; every flow, safety rule, check and the self-test (144 checks) | see below |
+| End to end | real InvenTree DB + real inventree-woocommerce + fake Xero; every flow, safety rule, check and the self-test (157 checks) | see below |
 | Settings doc | docs match the code | `python tools/gen_settings_doc.py --check` |
 | Live | the real Xero API | the self-test, from the settings panel or `inventree run python3 /opt/inventree/src/backend/InvenTree/manage.py xero_selftest --confirm-demo` |
 

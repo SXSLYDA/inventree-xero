@@ -354,6 +354,11 @@ class XeroClient:
             payload = {'Message': response.text[:500]}
         return response.status_code, response.headers, payload
 
+    def _http_raw(self, method, url, headers=None):
+        """One HTTP call returning the raw body (PDFs). Returns (status, headers, bytes). Tests fake this too."""
+        response = self.http.request(method, url, headers=headers, timeout=TIMEOUT)
+        return response.status_code, response.headers, response.content
+
     def _audit(self, mode, method, path, key, body, status=None, response=None, ok=False, error=''):
         from .models import XeroWriteAudit
 
@@ -471,6 +476,26 @@ class XeroClient:
         if not rows:
             raise XeroError(f'{doc_type} {xero_id} not found in Xero', 404)
         return rows[0]
+
+    def get_pdf(self, doc_type, xero_id):
+        """A document as Xero prints it (PDF bytes). Read-only, so allowed in every write mode."""
+        path, _ = DOC_ENDPOINTS[doc_type]
+        self.ensure_token()
+        url = f'{API_BASE}/{path}/{xero_id}'
+        for attempt in range(2):
+            headers = dict(self._auth_headers(), Accept='application/pdf')
+            try:
+                status, _, content = self._http_raw('GET', url, headers=headers)
+            except requests.RequestException as exc:
+                raise XeroError(f'Network error talking to Xero: {exc}') from exc
+            if status == 401 and attempt == 0:
+                self.conn.expires_at = None
+                self._refresh()
+                continue
+            break
+        if status >= 400 or not content.startswith(b'%PDF'):
+            raise XeroError(f'Xero did not return a PDF for {doc_type} {xero_id} (HTTP {status})', status)
+        return content
 
     def search_contacts(self, term):
         return self.get('Contacts', params={'searchTerm': term, 'page': 1}).get('Contacts') or []
