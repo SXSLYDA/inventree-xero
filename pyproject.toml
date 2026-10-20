@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventree-xero"
+dynamic = ["version"]
+description = "InvenTree plugin: sync purchase orders, bills, sales orders, contacts and items with Xero"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Tyler Brannigan / OMG Harness" }]
+requires-python = ">=3.11"
+dependencies = ["requests>=2.28", "cryptography>=41"]
+keywords = ["inventree", "inventree-plugin", "xero", "accounting", "purchase-orders", "invoices", "bills"]
+classifiers = [
+    "Framework :: Django",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Accounting",
+]
+
+[project.urls]
+Homepage = "https://github.com/SXSLYDA/inventree-xero"
+Issues = "https://github.com/SXSLYDA/inventree-xero/issues"
+
+[project.entry-points."inventree_plugins"]
+Xero = "inventree_xero.core:XeroPlugin"
+
+[tool.setuptools.packages.find]
+include = ["inventree_xero*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "inventree_xero.version.PLUGIN_VERSION" }
+
+[tool.setuptools.package-data]
+inventree_xero = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

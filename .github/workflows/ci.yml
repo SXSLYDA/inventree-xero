@@ -1,0 +1,128 @@
+name: CI
+
+# Runs on every push and pull request. On a release tag (vX.Y.Z, made by
+# build-and-bump.ps1) it also checks the tag matches the code, and - only if you
+# switch it on - deploys that exact tag to your InvenTree server after every test passes.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest django pyflakes
+      - run: python -m pyflakes inventree_xero tests tools
+      - run: pytest -q tests/test_mapping.py tests/test_safety.py
+      - run: python tools/gen_settings_doc.py --check
+      - run: shellcheck -S warning tools/server-update.sh
+      - name: Release tag matches version.py and CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python -c "import re; print(re.search(r'PLUGIN_VERSION\s*=\s*[\"\'](.+?)[\"\']', open('inventree_xero/version.py').read()).group(1))")
+          echo "tag ${GITHUB_REF_NAME}, version.py ${version}"
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "::error::Tag ${GITHUB_REF_NAME} does not match version.py (${version})"; exit 1; }
+          grep -q "^## ${version} " CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## ${version}' section"; exit 1; }
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-save jsdom@24
+      - run: node --test tests/ui.test.mjs
+
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        inventree: ["1.6.0"]
+    env:
+      INVENTREE_DB_ENGINE: sqlite3
+      INVENTREE_DB_NAME: ${{ github.workspace }}/data/inventree.sqlite3
+      INVENTREE_MEDIA_ROOT: ${{ github.workspace }}/data/media
+      INVENTREE_STATIC_ROOT: ${{ github.workspace }}/data/static
+      INVENTREE_BACKUP_DIR: ${{ github.workspace }}/data/backup
+      INVENTREE_CONFIG_FILE: ${{ github.workspace }}/data/config.yaml
+      INVENTREE_SECRET_KEY: ci-secret-key-ci-secret-key-ci-secret-key
+      INVENTREE_PLUGINS_ENABLED: "True"
+      INVENTREE_PLUGIN_TESTING: "True"
+      INVENTREE_PLUGIN_TESTING_SETUP: "True"
+      INVENTREE_SITE_URL: https://inventree.example.com
+      XERO_TESTS: ${{ github.workspace }}/plugin/tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: inventree/InvenTree
+          ref: ${{ matrix.inventree }}
+          path: inventree
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install InvenTree and the plugin
+        run: |
+          mkdir -p data
+          pip install -r inventree/src/backend/requirements.txt
+          pip install -e plugin
+          pip install "inventree-woocommerce @ git+https://github.com/SXSLYDA/inventree-woocommerce.git"
+      - name: Migrate and activate
+        working-directory: inventree/src/backend/InvenTree
+        run: |
+          python manage.py migrate --noinput
+          python manage.py shell -c "from plugin.models import PluginConfig; [PluginConfig.objects.update_or_create(key=k, defaults={'active': True}) for k in ('xero', 'woocommerce')]"
+          python manage.py migrate
+      - name: End-to-end
+        working-directory: inventree/src/backend/InvenTree
+        run: python manage.py shell -c "exec(open('${{ github.workspace }}/plugin/tests/e2e_inventree.py').read())"
+
+  # Deploys a release tag to your InvenTree server, only after unit, UI and end-to-end
+  # tests pass. Off unless you switch it on (docs/HANDOVER.md, "Releasing"):
+  #   Settings -> Secrets and variables -> Actions
+  #     Variables: XERO_DEPLOY = true
+  #     Secrets:   INVENTREE_HOST, INVENTREE_SSH_USER, INVENTREE_SSH_KEY (private key),
+  #                INVENTREE_SSH_KNOWN_HOSTS (output of: ssh-keyscan <host>) - recommended
+  #   Settings -> Environments -> inventree-production: add yourself as a required reviewer
+  #   to get an "Approve" button before each deploy (recommended for an accounts plugin).
+  deploy:
+    needs: [unit, ui, e2e]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.XERO_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    environment: inventree-production
+    concurrency:
+      group: inventree-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH key
+        env:
+          SSH_KEY: ${{ secrets.INVENTREE_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.INVENTREE_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.INVENTREE_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$KNOWN_HOSTS" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::INVENTREE_SSH_KNOWN_HOSTS not set - trusting the server's key on first sight"
+            ssh-keyscan -H "$HOST" > ~/.ssh/known_hosts
+          fi
+      - name: Update the server to ${{ github.ref_name }}
+        env:
+          HOST: ${{ secrets.INVENTREE_HOST }}
+          SSH_USER: ${{ secrets.INVENTREE_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$SSH_USER@$HOST" \
+            "sudo -n bash -s -- '${GITHUB_REF_NAME}'" < tools/server-update.sh
