@@ -4,6 +4,8 @@ Add notes for the next release under **Unreleased** as you work. `build-and-bump
 
 ## Unreleased
 
+## 1.5.0 — 2026-10-21
+
 Needs inventree-woocommerce 0.6.0 or later. Release as a minor version (`.\build-and-bump.ps1 -Bump minor`). No new migrations.
 
 - **Price and send in Xero** (new default for *Web shop quote requests*): this plugin becomes the shop's quote pricing provider. The shop's own pricing is locked, staff see "Priced in Xero" with the quote number and link, customers get **Xero's PDF**, and accept the whole quote (setting *Customers can accept part of a Xero quote*). Once created, the Xero quote's lines, discounts, tax rates and accounts are never written over - only status, expiry and contact.
