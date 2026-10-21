@@ -6,3 +6,6 @@ dist/
 .pytest_cache/
 node_modules/
 .venv/
+
+.idea/
+OMG-Harness-Xero-go-live-checklist.md
