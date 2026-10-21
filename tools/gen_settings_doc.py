@@ -21,9 +21,9 @@ def literal(node):
 
 
 def load_settings():
-    tree = ast.parse(CORE.read_text())
+    tree = ast.parse(CORE.read_text(encoding='utf-8'))
     groups, current = [], None
-    source = CORE.read_text().splitlines()
+    source = CORE.read_text(encoding='utf-8').splitlines()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(getattr(t, 'id', None) == 'SETTINGS' for t in node.targets):
             settings_node = node.value
@@ -97,13 +97,13 @@ def render(groups):
 def main():
     text = render(load_settings())
     if '--check' in sys.argv:
-        if not OUT.exists() or OUT.read_text() != text:
+        if not OUT.exists() or OUT.read_text(encoding='utf-8') != text:
             print('docs/SETTINGS.md is out of date - run python tools/gen_settings_doc.py')
             raise SystemExit(1)
         print('docs/SETTINGS.md is up to date')
         return
     OUT.parent.mkdir(exist_ok=True)
-    OUT.write_text(text)
+    OUT.write_text(text, encoding='utf-8', newline='\n')
     print(f'wrote {OUT.relative_to(ROOT)}')
 
 
