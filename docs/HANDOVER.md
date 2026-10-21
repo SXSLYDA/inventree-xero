@@ -225,7 +225,9 @@ It stops at the first problem, before changing anything. Then:
    - Terminal: `git push --follow-tags`.
 7. **CI runs on the tag:**
    - unit, UI and end-to-end tests;
-   - a check that the tag matches `version.py` and that `CHANGELOG.md` has the section.
+   - a check that the tag matches `version.py` and that `CHANGELOG.md` has the section;
+   - once all of that passes, it **publishes a GitHub Release** for the tag (the repo page's *Releases* list). The notes are that version's `CHANGELOG.md` section (`tools/release_notes.py`), plus the install/update commands. Re-running is safe: an existing release is left alone. If a tag fails CI, no release appears; fix it and release a new patch version rather than moving the tag.
+   - For a tag pushed before this job existed (v1.5.0 and earlier): *Actions → CI → Run workflow*, enter the tag in **release_tag**.
 8. **Update the server:** `sudo inventree-xero-update vX.Y.Z` (or just `sudo inventree-xero-update` for the newest), or let CI deploy it (below).
 
 **Why tags and not "latest from main":**

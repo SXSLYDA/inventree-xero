@@ -1,13 +1,22 @@
 name: CI
 
 # Runs on every push and pull request. On a release tag (vX.Y.Z, made by
-# build-and-bump.ps1) it also checks the tag matches the code, and - only if you
-# switch it on - deploys that exact tag to your InvenTree server after every test passes.
+# build-and-bump.ps1) it also checks the tag matches the code, publishes a GitHub
+# release with that version's CHANGELOG.md notes, and - only if you switch it on -
+# deploys that exact tag to your InvenTree server after every test passes.
+#
+# To publish a release for a tag pushed before this job existed (e.g. v1.5.0):
+# Actions -> CI -> Run workflow -> enter the tag in "release_tag".
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a GitHub release for this existing tag (e.g. v1.5.0). Leave empty for a normal run."
+        required: false
+        default: ""
 
 jobs:
   unit:
@@ -85,6 +94,46 @@ jobs:
       - name: End-to-end
         working-directory: inventree/src/backend/InvenTree
         run: python manage.py shell -c "exec(open('${{ github.workspace }}/plugin/tests/e2e_inventree.py').read())"
+
+  # A release tag: a GitHub release with that version's CHANGELOG.md section as the notes.
+  # Only after every test passes. Safe to re-run: an existing release is left alone.
+  release:
+    needs: [unit, ui, e2e]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release notes from CHANGELOG.md
+        run: |
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::'$TAG' is not a vX.Y.Z tag"; exit 1 ;; esac
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "::error::Tag $TAG does not exist"; exit 1; }
+          version="${TAG#v}"
+          # The tag's own CHANGELOG.md, so a backfilled release gets the notes as released.
+          git show "refs/tags/$TAG:CHANGELOG.md" > "$RUNNER_TEMP/CHANGELOG.md"
+          python tools/release_notes.py "$version" "$RUNNER_TEMP/CHANGELOG.md" > notes.md
+          cat >> notes.md <<NOTES
+
+          ---
+          **Install or update (package installer):** \`sudo inventree-xero-update ${TAG}\`
+          **Or pin in plugins.txt:** \`inventree-xero @ git+https://github.com/${GITHUB_REPOSITORY}.git@${TAG}\`, then \`invoke update\` and restart.
+          Read the notes above first: they say when a release adds a migration (which decides whether rolling back is safe).
+          NOTES
+          cat notes.md
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists - leaving it as it is."
+            exit 0
+          fi
+          gh release create "$TAG" --title "inventree-xero $TAG" --notes-file notes.md --verify-tag --latest=auto
 
   # Deploys a release tag to your InvenTree server, only after unit, UI and end-to-end
   # tests pass. Off unless you switch it on (docs/HANDOVER.md, "Releasing"):
