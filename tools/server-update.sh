@@ -1,39 +1,40 @@
 #!/usr/bin/env bash
-# inventree-xero-update - update the Xero plugin on an InvenTree server (package installer)
+# inventree-omg-update - update the OMG InvenTree plugin on an InvenTree server (package installer)
 #
 # Install once on the server:
-#   sudo curl -fsSL -o /usr/local/bin/inventree-xero-update \
-#        https://raw.githubusercontent.com/SXSLYDA/inventree-xero/main/tools/server-update.sh
-#   sudo chmod +x /usr/local/bin/inventree-xero-update
+#   sudo curl -fsSL -o /usr/local/bin/inventree-omg-update \
+#        https://raw.githubusercontent.com/SXSLYDA/inventree_omg_plugin/master/tools/server-update.sh
+#   sudo chmod +x /usr/local/bin/inventree-omg-update
 #
 # Use:
-#   sudo inventree-xero-update                 # newest release tag on GitHub
-#   sudo inventree-xero-update v1.4.2          # a specific release
-#   sudo inventree-xero-update --check-only    # show installed / pinned / newest, change nothing
-#   sudo inventree-xero-update v1.4.1 --allow-downgrade   # roll back (read the warning)
+#   sudo inventree-omg-update                 # newest release tag on GitHub
+#   sudo inventree-omg-update v0.2.1          # a specific release
+#   sudo inventree-omg-update --check-only    # show installed / pinned / newest, change nothing
+#   sudo inventree-omg-update v0.2.0 --allow-downgrade   # roll back (read the warning)
 #
 # What it does:
 #   1. Finds plugins.txt (from /etc/inventree/config.yaml) and the release tag to install.
 #   2. Backs up the database (inventree run invoke backup) and plugins.txt.
-#   3. Points the inventree-xero line in plugins.txt at that tag (adds it if missing).
+#   3. Points the inventree-omg-harness-import line in plugins.txt at that tag (adds it if missing).
 #   4. Runs "inventree run invoke update" (installs it, runs migrations, static files).
 #   5. Restarts InvenTree and confirms the installed version matches the tag.
-#   6. Runs the plugin's read-only configuration check against Xero.
 # If the update fails, plugins.txt is put back and it says how to reinstall the previous version.
 #
-# Options: --no-backup  --no-check  --allow-downgrade  --check-only
-#          --repo URL (default: the GitHub repo)  --plugins-file PATH  --app-home PATH
+# Options: --no-backup  --allow-downgrade  --check-only
+#          --repo URL (default: the GitHub repo)  --plugins-file PATH
 
 set -euo pipefail
 
-REPO="${XERO_PLUGIN_REPO:-https://github.com/SXSLYDA/inventree-xero.git}"
-PACKAGE="inventree-xero"
-APP_HOME="${INVENTREE_APP_HOME:-/opt/inventree}"
+REPO="${OMG_PLUGIN_REPO:-https://github.com/SXSLYDA/inventree_omg_plugin.git}"
+PACKAGE="inventree-omg-harness-import"
+# InvenTree's own virtualenv (package installer). "inventree run python3 -c '...'"
+# loses the quoting on the way through, so the version is read with that
+# venv's pip instead.
+INVENTREE_PIP="${INVENTREE_PIP:-/opt/inventree/env/bin/pip}"
 CONFIG="${INVENTREE_CONFIG_FILE:-/etc/inventree/config.yaml}"
 PLUGINS_FILE=""
 TAG=""
 BACKUP=1
-CHECK=1
 ALLOW_DOWNGRADE=0
 CHECK_ONLY=0
 
@@ -46,13 +47,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         v[0-9]*.[0-9]*.[0-9]*) TAG="$1" ;;
         --no-backup) BACKUP=0 ;;
-        --no-check) CHECK=0 ;;
         --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
         --check-only) CHECK_ONLY=1 ;;
         --repo) REPO="$2"; shift ;;
         --plugins-file) PLUGINS_FILE="$2"; shift ;;
-        --app-home) APP_HOME="$2"; shift ;;
-        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) die "unknown option '$1' (try --help)" ;;
     esac
     shift
@@ -61,6 +60,7 @@ done
 [ "$(id -u)" -eq 0 ] || die "run with sudo (the InvenTree service commands need root)."
 command -v inventree >/dev/null || die "the 'inventree' command isn't here - this script is for package-installer servers."
 command -v git >/dev/null || die "git isn't installed (apt install git)."
+[ -x "$INVENTREE_PIP" ] || die "InvenTree's pip isn't at $INVENTREE_PIP - run with INVENTREE_PIP=/path/to/env/bin/pip."
 
 vercmp() {  # prints -1, 0 or 1 comparing X.Y.Z strings
     if [ "$1" = "$2" ]; then echo 0; return; fi
@@ -68,7 +68,7 @@ vercmp() {  # prints -1, 0 or 1 comparing X.Y.Z strings
 }
 
 installed_version() {
-    inventree run python3 -c "import importlib.metadata as m; print(m.version('$PACKAGE'))" 2>/dev/null | tail -1 || true
+    "$INVENTREE_PIP" show "$PACKAGE" 2>/dev/null | sed -n 's/^Version:[[:space:]]*//p' | head -1 || true
 }
 
 # ------------------------------------------------------------------ 1. where and what
@@ -161,22 +161,10 @@ else
 fi
 NOW="$(installed_version)"
 if [ "$NOW" = "$TARGET" ]; then
-    ok "inventree-xero $NOW is installed."
+    ok "$PACKAGE $NOW is installed."
 else
     restore_pin
     die "expected $TARGET to be installed but found '${NOW:-nothing}'."
-fi
-
-# ------------------------------------------------------------------ 6. configuration check
-if [ "$CHECK" -eq 1 ]; then
-    say "Configuration check (read-only)"
-    MANAGE="$APP_HOME/src/backend/InvenTree/manage.py"
-    if [ -f "$MANAGE" ]; then
-        sleep 5
-        inventree run python3 "$MANAGE" xero_check || warn "The configuration check reported problems (above) - look at them before the next sync."
-    else
-        warn "manage.py not found at $MANAGE - skipping the check (use --app-home)."
-    fi
 fi
 
 echo
