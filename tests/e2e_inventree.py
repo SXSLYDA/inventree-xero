@@ -187,6 +187,72 @@ check('supplier freight kept on bill', any('Supplier freight' in ln['Description
 check('Xero PO marked billed', fake.store['PurchaseOrders'][meta['id']]['Status'] == 'BILLED')
 check('PO link now final', xmeta(po).get('final') is True)
 
+# ================================================================== 3b. Bills per supplier invoice (e.g. Mouser back orders)
+mouser_co = Company.objects.create(name='Mouser Electronics Test', is_supplier=True)
+fuse_a = Part.objects.create(name='RKEF135', description='PPTC fuse 1.35A', purchaseable=True)
+fuse_b = Part.objects.create(name='RKEF110', description='PPTC fuse 1.1A', purchaseable=True)
+sp_a = SupplierPart.objects.create(part=fuse_a, supplier=mouser_co, SKU='650-RKEF135')
+sp_b = SupplierPart.objects.create(part=fuse_b, supplier=mouser_co, SKU='650-RKEF110')
+mpo = PurchaseOrder.objects.create(supplier=mouser_co, reference=PurchaseOrder.generate_reference(),
+                                   supplier_reference='300000017')
+la = PurchaseOrderLineItem.objects.create(order=mpo, part=sp_a, quantity=10, purchase_price=Money('0.621', 'AUD'))
+lb = PurchaseOrderLineItem.objects.create(order=mpo, part=sp_b, quantity=50, purchase_price=Money('0.715', 'AUD'))
+PurchaseOrderExtraLine.objects.create(order=mpo, reference='Mouser fees', quantity=1, price=Money('5', 'AUD'))
+mpo.place_order()
+# first box: invoice 93170001 - all of A, 30 of B, with the fees that relate to it
+PurchaseOrderLineItem.objects.filter(pk=la.pk).update(received=10)
+PurchaseOrderLineItem.objects.filter(pk=lb.pk).update(received=30)
+inv1 = {'number': '93170001', 'date': '2026-10-24', 'due_date': '2026-10-24', 'source': 'mouser',
+        'lines': [{'line': la.pk, 'quantity': '10'}, {'line': lb.pk, 'quantity': '30'}],
+        'extra': [{'description': 'Mouser fee TARIFF - 650-RKEF135', 'amount': '3.20'},
+                  {'description': 'Mouser fees - order 300000017', 'amount': '1.80'}]}
+mpo.refresh_from_db()
+mpo.metadata = {**(mpo.metadata or {}), 'supplier_invoices': [inv1]}
+mpo.save()
+sync, result = run('export')
+mpo.refresh_from_db()
+mmeta = xmeta(mpo)
+check('no whole-order bill for an order billed per supplier invoice', not (mmeta.get('bill') or {}).get('id'))
+b1 = fake.store['Invoices'].get(((mmeta.get('bills') or {}).get('93170001') or {}).get('id'))
+check('bill for the first invoice', b1 is not None and b1['Type'] == 'ACCPAY', mmeta.get('bills'))
+check('Xero reference = Mouser invoice number', b1['InvoiceNumber'] == '93170001', b1.get('InvoiceNumber'))
+check('dated the invoice date, due as recorded', str(b1.get('Date', ''))[:10] == '2026-10-24'
+      and str(b1.get('DueDate', ''))[:10] == '2026-10-24', (b1.get('Date'), b1.get('DueDate')))
+qty1 = sorted(ln['Quantity'] for ln in b1['LineItems'] if 'fee' not in ln['Description'].lower())
+check('only what was on that invoice', qty1 == [10, 30], b1['LineItems'])
+check('its fees, not the PO extra line', sorted(ln['UnitAmount'] for ln in b1['LineItems']
+                                                if 'fee' in ln['Description'].lower()) == [1.8, 3.2], b1['LineItems'])
+check('GST tax type on every line', all(ln.get('TaxType') == 'INPUT' for ln in b1['LineItems']))
+check('approved per the bill status setting', b1['Status'] == 'AUTHORISED', b1['Status'])
+sync, result = run('export')
+check('nothing re-sent when unchanged', len([i for i in fake.store['Invoices'].values()
+                                              if i.get('InvoiceNumber') in ('93170001', '93170002')]) == 1)
+# second box, weeks later: invoice 93170002 - the other 20 of B, on account (due in 30 days)
+PurchaseOrderLineItem.objects.filter(pk=lb.pk).update(received=50)
+mpo.refresh_from_db()
+inv2 = {'number': '93170002', 'date': '2026-11-02', 'due_date': '2026-12-02', 'source': 'mouser',
+        'lines': [{'line': lb.pk, 'quantity': '20'}], 'extra': []}
+mpo.metadata = {**mpo.metadata, 'supplier_invoices': [inv1, inv2]}
+mpo.save()
+sync, result = run('export')
+mpo.refresh_from_db()
+bills = xmeta(mpo).get('bills') or {}
+b2 = fake.store['Invoices'].get((bills.get('93170002') or {}).get('id'))
+check('second invoice gets its own bill', b2 is not None and b2['InvoiceNumber'] == '93170002')
+check('second bill: its date, due date and only its line', str(b2['Date'])[:10] == '2026-11-02'
+      and str(b2['DueDate'])[:10] == '2026-12-02' and [ln['Quantity'] for ln in b2['LineItems']] == [20], b2)
+check('first bill left as it was', fake.store['Invoices'][bills['93170001']['id']]['LineItems'] == b1['LineItems'])
+# paid in Xero -> status comes back; complete the PO -> Xero PO marked billed once every invoice has its bill
+fake.edit_in_xero('Invoices', b1['InvoiceID'], Status='PAID', AmountDue=0, AmountPaid=b1.get('Total', 0))
+mpo.complete_order()
+sync, result = run('all')
+mpo.refresh_from_db()
+bills = xmeta(mpo).get('bills') or {}
+check('payment status read back per invoice', bills['93170001']['status'] == 'PAID', bills['93170001'])
+xpo_m = fake.store['PurchaseOrders'].get(xmeta(mpo).get('id'))
+check('Xero PO marked billed when every invoice is billed', xpo_m is not None and xpo_m['Status'] == 'BILLED',
+      xpo_m and xpo_m['Status'])
+
 # ================================================================== 4. Import: parts only, rest stays in Xero
 acme = fake.add_contact('Acme Supplies Test')
 fake.add_document('PurchaseOrders', {
@@ -298,6 +364,24 @@ r = client.get('/plugin/xero/api/search/', {'q': fake.store['Invoices'][bill['id
 check('search finds PO', po.reference in [row['reference'] for row in r.json()['results']])
 r = client.get(f'/plugin/xero/api/order/po/{po.pk}/')
 check('order panel API has bill', r.status_code == 200 and r.json()['bill']['linked'], r.content[:300])
+r = client.get(f'/plugin/xero/api/order/po/{mpo.pk}/')
+ib = {b['invoice']: b for b in r.json().get('invoice_bills') or []}
+check('order panel API lists a bill per supplier invoice', set(ib) == {'93170001', '93170002'}
+      and ib['93170001']['linked'] and ib['93170002']['due_date'] == '2026-12-02', r.json().get('invoice_bills'))
+check('nothing received outside an invoice', r.json().get('uninvoiced') == [], r.json().get('uninvoiced'))
+# a Mouser PO received with InvenTree's own Receive Items (not by invoice): no bill, flagged instead
+npo = PurchaseOrder.objects.create(supplier=mouser_co, reference=PurchaseOrder.generate_reference(),
+                                   supplier_reference='300000099', metadata={'supplier_invoices': []})
+nl = PurchaseOrderLineItem.objects.create(order=npo, part=sp_a, quantity=5, purchase_price=Money('0.621', 'AUD'))
+npo.place_order()
+PurchaseOrderLineItem.objects.filter(pk=nl.pk).update(received=5)
+sync, result = run('export')
+npo.refresh_from_db()
+check('billed-per-invoice PO with no invoice yet: no whole-order bill', not (xmeta(npo).get('bill') or {}).get('id')
+      and not xmeta(npo).get('bills'), xmeta(npo))
+r = client.get(f'/plugin/xero/api/order/po/{npo.pk}/')
+check('received outside an invoice is flagged on the panel', r.json().get('bills_per_invoice')
+      and r.json().get('uninvoiced') == [{'sku': '650-RKEF135', 'quantity': 5.0}], r.json().get('uninvoiced'))
 r = client.get(f'/plugin/xero/api/company/{customer.pk}/')
 check('company panel API has balance', r.json()['xero']['balance']['receivable_overdue'] == 220.0)
 r = client.get(f'/plugin/xero/api/part/{connector.pk}/')

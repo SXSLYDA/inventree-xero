@@ -29,6 +29,8 @@ from .mapping import (
     FINAL_STATUSES,
     META_KEY,
     PO_STATUS_RANK,
+    SUPPLIER_INVOICES_KEY,
+    bills_per_invoice,
     ContactMapper,
     ItemMapper,
     as_float,
@@ -39,6 +41,7 @@ from .mapping import (
     payload_hash,
     preserved_lines,
     strip_tag,
+    supplier_invoices,
     tagged_description,
     write_meta,
     xero_only_summary,
@@ -185,9 +188,16 @@ class XeroSync:
         if level == 'error':
             self.stats['errors'] += 1
 
-    def _fail(self, order, kind, direction, exc):
+    @staticmethod
+    def _target(meta, kind, invoice=None):
+        """Where a link lives in the order's metadata: the order, its bill, or one supplier invoice's bill."""
+        if kind == 'bill' and invoice:
+            return meta.setdefault('bills', {}).setdefault(str(invoice), {})
+        return meta.setdefault('bill', {}) if kind == 'bill' else meta
+
+    def _fail(self, order, kind, direction, exc, invoice=None):
         meta = xmeta(order)
-        target = meta.setdefault('bill', {}) if kind == 'bill' else meta
+        target = self._target(meta, kind, invoice)
         target['error'] = str(exc)[:500]
         target['error_at'] = timezone.now().isoformat()
         write_meta(order, meta)
@@ -196,10 +206,10 @@ class XeroSync:
                  xero_id=target.get('id', ''), number=target.get('number', ''))
         self.alerts.add('error', order.reference, str(exc)[:500])
 
-    def _hold(self, order, kind, reason):
+    def _hold(self, order, kind, reason, invoice=None):
         """Not sent: needs a person. Shown on the order, logged and alerted (once per reason)."""
         meta = xmeta(order)
-        target = meta.setdefault('bill', {}) if kind == 'bill' else meta
+        target = self._target(meta, kind, invoice)
         already = (target.get('held') or {}).get('reason') == reason
         target['held'] = {'reason': reason, 'at': timezone.now().isoformat()}
         write_meta(order, meta)
@@ -209,9 +219,9 @@ class XeroSync:
                      xero_id=target.get('id', ''), number=target.get('number', ''))
         self.alerts.add('held', order.reference, reason)
 
-    def _dry_run_note(self, order, kind):
+    def _dry_run_note(self, order, kind, invoice=None):
         meta = xmeta(order)
-        target = meta.setdefault('bill', {}) if kind == 'bill' else meta
+        target = self._target(meta, kind, invoice)
         target['dry_run'] = {'at': timezone.now().isoformat(), 'would': self._preview_text}
         target.pop('held', None)
         write_meta(order, meta)
@@ -434,6 +444,15 @@ class XeroSync:
             if kind == 'po':
                 payload, note = self.plan_purchase_order(order)
                 doc_type, compare = 'po', True
+            elif kind == 'bill' and bills_per_invoice(order):
+                payload, note = None, 'no supplier invoice left to bill'
+                for inv in supplier_invoices(order):
+                    candidate, why = self.plan_invoice_bill(order, inv)
+                    bill_link = (meta.get('bills') or {}).get(str(inv['number'])) or {}
+                    if candidate is not None and payload_hash(candidate) != bill_link.get('hash'):
+                        payload, note, link = candidate, why, bill_link
+                        break
+                doc_type, compare = 'bill', False
             elif kind == 'bill':
                 payload, note = self.plan_bill(order)
                 doc_type, compare = 'bill', False
@@ -481,6 +500,10 @@ class XeroSync:
         if kind == 'po' and bill.get('id'):
             info = doc_info('bill', self.client.get_document('bill', bill['id']), self.short_code)
             results.append(self.safe_import(self.import_bill, info, force=True))
+        for invoice_bill in (meta.get('bills') or {}).values() if kind == 'po' else []:
+            if invoice_bill.get('id'):
+                info = doc_info('bill', self.client.get_document('bill', invoice_bill['id']), self.short_code)
+                results.append(self.safe_import(self.import_bill, info, force=True))
         if not results:
             return False, 'Order is not linked to Xero yet'
         ok = all(r[0] for r in results)
@@ -682,11 +705,19 @@ class XeroSync:
         cutoff = date.today() - timedelta(days=self.number('EXPORT_LOOKBACK_DAYS', 180))
         orders = PurchaseOrder.objects.filter(
             Q(status__in=wanted, creation_date__gte=cutoff) | Q(**{f'metadata__{META_KEY}__bill__has_key': 'id'})
+            | Q(metadata__has_key=SUPPLIER_INVOICES_KEY)
         ).select_related('supplier').order_by('pk')
         for po in orders:
-            bill = xmeta(po).get('bill') or {}
-            if bill.get('final') or bill.get('origin') == 'xero':
-                continue
+            meta = xmeta(po)
+            if bills_per_invoice(po):
+                bills = meta.get('bills') or {}
+                if all((bills.get(inv['number']) or {}).get('final') or (bills.get(inv['number']) or {}).get('origin') == 'xero'
+                       for inv in supplier_invoices(po)):
+                    continue
+            else:
+                bill = meta.get('bill') or {}
+                if bill.get('final') or bill.get('origin') == 'xero':
+                    continue
             self.safe_export(self.export_bill, po, 'bill')
 
     @staticmethod
@@ -729,6 +760,7 @@ class XeroSync:
             'Date': bill_date.isoformat(),
             'DueDate': (bill_date + timedelta(days=self.number('BILL_DUE_DAYS', 30))).isoformat(),
             'LineAmountTypes': self.setting('LINE_AMOUNT_TYPES') or 'Exclusive',
+            'InvoiceNumber': self.bill_reference(po),   # shown as the bill's Reference in Xero
             'Reference': self.bill_reference(po),
             'Status': status,
             'LineItems': lines,
@@ -736,7 +768,135 @@ class XeroSync:
         self.currency_field(po, payload)
         return payload, status
 
+    # ---------------------------------------------------------------- bills per supplier invoice
+    def plan_invoice_bill(self, po, inv):
+        """
+        (payload, note) for one supplier invoice on a purchase order: dated the invoice date, due on its
+        due date, Xero Reference = the supplier's invoice number, only the lines and quantities on that
+        invoice (at the purchase order's prices) and the fees that relate to it.
+        """
+        meta = xmeta(po)
+        link = (meta.get('bills') or {}).get(inv['number']) or {}
+        if link.get('status') in FINAL_STATUSES['bill']:
+            return None, f'bill for invoice {inv["number"]} is {link["status"]} in Xero'
+        if link.get('origin') == 'xero':
+            return None, f'bill for invoice {inv["number"]} was created in Xero - not changed by InvenTree'
+        if self.status_name(self.po_status(), po.status) in CANCELLED_NAMES:
+            return None, 'purchase order cancelled'
+        account = self.account_details('purchase')
+        by_pk = {li.pk: li for li in po.lines.all().select_related('part', 'part__part', 'part__manufacturer_part')}
+        lines = []
+        for row in inv.get('lines') or []:
+            li = by_pk.get(row.get('line'))
+            quantity = as_float(row.get('quantity'))
+            if li is None or quantity <= 0:
+                continue
+            sp = li.part
+            code = self.items.code_for(sp.part if sp else None, sp)
+            lines.append(self._line(self._po_line_description(li), quantity, money_amount(li.purchase_price),
+                                    li.discount, account, code))
+        for extra in inv.get('extra') or []:
+            if as_float(extra.get('amount')):
+                lines.append(self._line(extra.get('description') or 'Fee', 1, as_float(extra.get('amount')), 0, account))
+        if not lines:
+            return None, f'nothing on invoice {inv["number"]}'
+        try:
+            bill_date = date.fromisoformat(inv.get('date') or '')
+        except ValueError:
+            bill_date = date.today()
+        try:
+            due = date.fromisoformat(inv.get('due_date') or '')
+        except ValueError:
+            due = bill_date + timedelta(days=self.number('BILL_DUE_DAYS', 30))
+        status = self.safety.cap('bill', self.setting('BILL_STATUS') or 'DRAFT')
+        payload = {
+            'Type': 'ACCPAY',
+            'Contact': {'ContactID': self.contacts.ensure(po.supplier)},
+            'Date': bill_date.isoformat(),
+            'DueDate': max(due, bill_date).isoformat(),
+            'LineAmountTypes': self.setting('LINE_AMOUNT_TYPES') or 'Exclusive',
+            'InvoiceNumber': str(inv['number'])[:255],        # the supplier's invoice number = Reference in Xero
+            'Reference': self.bill_reference(po),
+            'Status': status,
+            'LineItems': lines,
+        }
+        self.currency_field(po, payload)
+        return payload, status
+
+    def uninvoiced(self, po):
+        """Lines received in InvenTree beyond what the supplier invoices cover: [(SKU, quantity)] - not billed."""
+        covered = Counter()
+        for inv in supplier_invoices(po):
+            for row in inv.get('lines') or []:
+                covered[row.get('line')] += as_float(row.get('quantity'))
+        out = []
+        for li in po.lines.all().select_related('part'):
+            extra = as_float(li.received) - covered.get(li.pk, 0)
+            if extra > 0.0001:
+                out.append(((li.part.SKU if li.part else '') or f'line {li.pk}', round(extra, 4)))
+        return out
+
+    def export_invoice_bills(self, po, force=False):
+        """One Xero bill per supplier invoice recorded on the purchase order - each sent once received."""
+        meta = xmeta(po)
+        if (meta.get('bill') or {}).get('id'):
+            return 'skipped: the order already has one bill for the whole order in Xero - unlink it to bill per invoice'
+        results = []
+        for inv in supplier_invoices(po):
+            number = str(inv['number'])
+            link = (xmeta(po).get('bills') or {}).get(number) or {}
+            try:
+                payload, note = self.plan_invoice_bill(po, inv)
+                if payload is None:
+                    if link.get('id') and link.get('status') in FINAL_STATUSES['bill'] and not link.get('final'):
+                        meta = xmeta(po)
+                        meta.setdefault('bills', {})[number] = dict(link, final=True)
+                        write_meta(po, meta)
+                    self.stats['skipped'] += 1
+                    results.append(f'{number}: skipped ({note})')
+                    continue
+                digest = payload_hash(payload)
+                if link.get('id') and digest == link.get('hash') and not force:
+                    self.stats['unchanged'] += 1
+                    results.append(f'{number}: unchanged')
+                    continue
+                doc, owned = self.guarded_send('bill', 'bill', po, payload, link, compare_total=False)
+            except Hold as exc:
+                self._hold(po, 'bill', f'invoice {number}: {exc}', invoice=number)
+                results.append(f'{number}: held ({exc})')
+                continue
+            except DryRunWrite:
+                self._dry_run_note(po, 'bill', invoice=number)
+                results.append(f'{number}: dry run - would {self._preview_text}')
+                continue
+            except WritesPaused:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one invoice failing doesn't stop the rest
+                if not isinstance(exc, XeroError):
+                    logger.exception('Xero bill for %s invoice %s failed', po, number)
+                self._fail(po, 'bill', 'export', exc, invoice=number)
+                results.append(f'{number}: error ({exc})')
+                continue
+            info = doc_info('bill', doc, self.short_code)
+            action = 'update' if link.get('id') else 'create'
+            meta = xmeta(po)
+            new = meta_from_info(info, link, hash=digest, line_ids=owned, origin='inventree',
+                                 date=payload['Date'], invoice=number)
+            new.pop('held', None)
+            new.pop('dry_run', None)
+            meta.setdefault('bills', {})[number] = new
+            write_meta(po, meta)
+            self.stats['bills'] += 1
+            self.log('info', 'export', 'bill', action,
+                     f'{po.reference} invoice {number} → Xero bill {info["number"] or ""} ({info["status"]}, {payload["Date"]})',
+                     ref=po.reference, pk=po.pk, xero_id=info['id'], number=info['number'])
+            results.append(f'{number}: bill {action}d ({info["status"]})')
+        self.mark_po_billed(po)
+        return '; '.join(results) or 'no supplier invoices'
+
     def export_bill(self, po, force=False):
+        if bills_per_invoice(po):
+            return self.export_invoice_bills(po, force=force)
         meta = xmeta(po)
         bill = meta.get('bill') or {}
         payload, note = self.plan_bill(po)
@@ -775,7 +935,13 @@ class XeroSync:
         if not self.flag('MARK_PO_BILLED'):
             return
         meta = xmeta(po)
-        if not meta.get('id') or meta.get('status') in ('BILLED', 'DELETED') or not (meta.get('bill') or {}).get('id'):
+        invoices = supplier_invoices(po)
+        if bills_per_invoice(po):
+            bills = meta.get('bills') or {}
+            billed = bool(invoices) and all((bills.get(str(inv['number'])) or {}).get('id') for inv in invoices)
+        else:
+            billed = bool((meta.get('bill') or {}).get('id'))
+        if not meta.get('id') or meta.get('status') in ('BILLED', 'DELETED') or not billed:
             return
         if self.status_name(self.po_status(), po.status) != 'complete':
             return
@@ -1247,6 +1413,11 @@ class XeroSync:
 
         po = PurchaseOrder.objects.filter(**{f'metadata__{META_KEY}__bill__id': info['id']}).first()
         new_link = False
+        invoice = None
+        if po is None:
+            po, invoice, new_link = self._invoice_bill_owner(info)
+        if invoice:
+            return self._import_invoice_bill(po, invoice, info, new_link, force)
         if po is None and self.flag('LINK_XERO_BILLS'):
             tokens = {t for t in re.split(r'[\s/,;|()#]+', f'{info["reference"]} {info["number"]}') if t}
             for candidate in PurchaseOrder.objects.filter(reference__in=tokens):
@@ -1270,6 +1441,45 @@ class XeroSync:
         self.log('info', 'import', 'bill', 'link' if new_link else 'update',
                  f'Xero bill {info["number"] or info["reference"]} ({info["status"]}, due {info["amount_due"]}) '
                  f'{"linked to" if new_link else "on"} {po.reference}',
+                 ref=po.reference, pk=po.pk, xero_id=info['id'], number=info['number'])
+        if info['status'] in ('AUTHORISED', 'PAID'):
+            self.mark_po_billed(po)
+        return 'updated'
+
+    def _invoice_bill_owner(self, info):
+        """(po, invoice number, newly linked) for a Xero bill that is one supplier invoice's bill."""
+        from order.models import PurchaseOrder
+
+        orders = list(PurchaseOrder.objects.filter(metadata__has_key=SUPPLIER_INVOICES_KEY))
+        for po in orders:
+            for number, link in (xmeta(po).get('bills') or {}).items():
+                if link.get('id') == info['id']:
+                    return po, number, False
+        if self.flag('LINK_XERO_BILLS') and info['number']:
+            # a bill entered in Xero with the supplier's invoice number, for an invoice not billed yet
+            for po in orders:
+                if po.supplier_id is None:
+                    continue
+                for inv in supplier_invoices(po):
+                    if str(inv['number']) == str(info['number']).strip() \
+                            and not ((xmeta(po).get('bills') or {}).get(str(inv['number'])) or {}).get('id'):
+                        return po, str(inv['number']), True
+        return None, None, False
+
+    def _import_invoice_bill(self, po, number, info, new_link, force):
+        meta = xmeta(po)
+        link = (meta.get('bills') or {}).get(number) or {}
+        stored = parse_xero_date(link.get('updated'))
+        if not force and not new_link and stored and info['updated'] and info['updated'] <= stored:
+            self.stats['unchanged'] += 1
+            return 'unchanged'
+        extra = {'origin': 'xero', 'line_ids': []} if new_link else {}
+        meta.setdefault('bills', {})[number] = meta_from_info(info, link, invoice=number, **extra)
+        write_meta(po, meta)
+        self.stats['updated'] += 1
+        self.log('info', 'import', 'bill', 'link' if new_link else 'update',
+                 f'Xero bill {info["number"] or info["reference"]} ({info["status"]}, due {info["amount_due"]}) '
+                 f'{"linked to" if new_link else "on"} {po.reference} invoice {number}',
                  ref=po.reference, pk=po.pk, xero_id=info['id'], number=info['number'])
         if info['status'] in ('AUTHORISED', 'PAID'):
             self.mark_po_billed(po)

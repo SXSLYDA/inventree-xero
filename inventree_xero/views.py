@@ -14,7 +14,7 @@ from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .mapping import META_KEY, xmeta
+from .mapping import META_KEY, bills_per_invoice, supplier_invoices, xmeta
 from .models import XeroConnection, XeroSyncLog
 from .xero_client import XeroClient, XeroError
 
@@ -282,6 +282,21 @@ def _link_summary(meta):
     }
 
 
+def _uninvoiced(po):
+    """Received in InvenTree but on no supplier invoice - those quantities aren't billed."""
+    from collections import Counter
+
+    covered = Counter()
+    for inv in supplier_invoices(po):
+        for row in inv.get('lines') or []:
+            try:
+                covered[row.get('line')] += float(row.get('quantity') or 0)
+            except (TypeError, ValueError):
+                pass
+    return [{'sku': (li.part.SKU if li.part else '') or f'line {li.pk}', 'quantity': float(li.received) - covered[li.pk]}
+            for li in po.lines.all().select_related('part') if float(li.received) - covered[li.pk] > 0.0001]
+
+
 def _order_row(order, kind):
     meta = xmeta(order)
     party = order.supplier if kind == 'po' else order.customer
@@ -303,6 +318,16 @@ def _order_row(order, kind):
     }
     if kind == 'po':
         row['bill'] = _link_summary(meta.get('bill') or {})
+        invoices = supplier_invoices(order)
+        if bills_per_invoice(order):
+            row['bills_per_invoice'] = True
+            bills = meta.get('bills') or {}
+            row['invoice_bills'] = [{
+                'invoice': str(inv['number']), 'date': inv.get('date'), 'due_date': inv.get('due_date'),
+                'lines': len(inv.get('lines') or []), 'fees': len(inv.get('extra') or []),
+                **_link_summary(bills.get(str(inv['number'])) or {}),
+            } for inv in invoices]
+            row['uninvoiced'] = _uninvoiced(order)
     if kind == 'so':
         from .models import XeroQuoteLink
 
@@ -435,8 +460,9 @@ class OrderXeroView(XeroAPIView):
         elif action == 'unlink-bill' and kind == 'po':
             meta = xmeta(order)
             meta.pop('bill', None)
+            meta.pop('bills', None)
             write_meta(order, meta)
-            ok, message = True, 'Bill link removed (the Xero bill was not changed)'
+            ok, message = True, 'Bill link(s) removed (the Xero bills were not changed)'
         else:
             return Response({'error': 'Unknown action'}, status=400)
         row = _order_row(self._order(kind, pk), kind)
@@ -660,7 +686,7 @@ def _clear_contact_holds(order):
 
     meta = xmeta(order)
     changed = False
-    for target in (meta, meta.get('bill') or {}):
+    for target in (meta, meta.get('bill') or {}, *(meta.get('bills') or {}).values()):
         reason = (target.get('held') or {}).get('reason', '')
         if 'contact' in reason.lower():
             target.pop('held', None)

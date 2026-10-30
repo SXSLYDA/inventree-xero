@@ -191,7 +191,29 @@ async function renderOrder(root, ctx, kind, pk) {
     const x = d.xero || {};
     const b = d.bill || {};
     const docLabel = kind === 'po' ? 'Purchase order' : (x.doc_type === 'quote' ? 'Quote' : 'Sales invoice');
-    const billBlock = kind !== 'po' ? '' : `
+    const ib = d.invoice_bills || [];
+    const invoiceBillsBlock = !d.bills_per_invoice ? '' : `
+      <h4>Bills - one per supplier invoice</h4>
+      ${b.linked ? `<div class="msg err">This order already has one bill for the whole order in Xero (${esc(b.number || '')}), so no
+        per-invoice bills are made - unlink it (and void it in Xero) to bill per invoice.</div>` : ''}
+      ${!ib.length ? '<p class="muted">Billed per supplier invoice: each bill is made once that invoice is received (Mouser panel - Receive by Mouser invoice).</p>' : ''}
+      <div class="tbl"><table><thead><tr><th>Invoice</th><th>Date</th><th>Due</th><th>Bill</th><th>Total</th><th>Due now</th></tr></thead><tbody>
+      ${ib.map((r) => `<tr><td><b>${esc(r.invoice)}</b><div class="muted">${esc(r.lines)} line(s)${r.fees ? `, ${esc(r.fees)} fee(s)` : ''}</div></td>
+        <td>${esc(r.date || '')}</td><td>${esc(r.due_date || '')}</td>
+        <td>${r.linked ? `${statusBadge(r.status)} ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.number || 'bill')} ↗</a>` : esc(r.number || '')}`
+          : '<span class="badge">not sent yet</span>'}${r.origin === 'xero' ? ' <span class="badge info">entered in Xero</span>' : ''}
+          ${r.held ? `<div class="msg err">Held: ${esc(r.held)}</div>` : ''}${r.error ? `<div class="msg err">${esc(r.error)}</div>` : ''}
+          ${r.dry_run ? `<div class="muted">Dry run - would ${esc(r.dry_run)}</div>` : ''}</td>
+        <td>${r.linked ? money(r.total) : ''}</td><td>${r.linked ? money(r.amount_due) : ''}</td></tr>`).join('')}
+      </tbody></table></div>
+      ${(d.uninvoiced || []).length ? `<div class="msg err">Received but not on any supplier invoice (not billed):
+        ${d.uninvoiced.map((u) => `${esc(u.sku)} × ${esc(u.quantity)}`).join(', ')}</div>` : ''}
+      <div class="xr-row">
+        <button data-act="bill">Send / update bills now</button>
+        <button data-act="preview-bill">Preview next bill</button>
+        ${ib.some((r) => r.linked) || b.linked ? '<button class="danger" data-act="unlink-bill">Unlink bills</button>' : ''}
+      </div>`;
+    const billBlock = kind !== 'po' ? '' : d.bills_per_invoice ? invoiceBillsBlock : `
       <h4>Bill</h4>
       <div class="xr-row">${b.linked ? statusBadge(b.status) : '<span class="badge">no bill</span>'}
         ${b.linked ? `<b>${esc(b.number || 'Bill')}</b>` : `<span class="muted">${d.bills_mode === 'off'

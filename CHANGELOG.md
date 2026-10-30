@@ -4,6 +4,11 @@ Add notes for the next release under **Unreleased** as you work. `build-and-bump
 
 ## Unreleased
 
+## 1.5.1 — 2026-10-30
+
+- **One bill per supplier invoice.** A purchase order with `metadata['supplier_invoices']` (set by the Mouser plugin on Mouser orders and filled as each box is received by its invoice) is billed per invoice instead of once: each bill is dated the invoice date, due on its due date, has the supplier's invoice number as its Reference, and holds only that invoice's lines and quantities (at the PO's prices) and the fees recorded with it. Each bill is sent once its invoice is recorded, and its status, payments, holds and errors are kept on their own (`metadata['xero']['bills']`) and shown in a table on the PO's Xero panel; the Xero PO is marked Billed once the PO is complete and every invoice is billed. Stock received outside an invoice isn't billed and is listed on the panel. A bill keyed in Xero with the supplier's invoice number is linked to that invoice (*Link bills entered in Xero*). *Unlink bill* removes these links too. No new settings or migrations.
+- **Bill Reference now shows in Xero.** Xero shows a bill's `InvoiceNumber` as its Reference - the `Reference` field is for sales invoices only - so bills went to Xero with a blank Reference. Whole-order bills now send the PO number / supplier reference as `InvoiceNumber` too; draft bills already in Xero get it on their next update.
+
 ## 1.5.0 — 2026-10-21
 
 Needs inventree-woocommerce 0.6.0 or later. Release as a minor version (`.\build-and-bump.ps1 -Bump minor`). No new migrations.

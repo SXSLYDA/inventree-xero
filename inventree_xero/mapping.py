@@ -38,6 +38,24 @@ DOC_KEYS = {
     'bill': ('InvoiceID', 'InvoiceNumber'),
 }
 
+# PurchaseOrder.metadata key another plugin (e.g. inventree-mouser) fills with the supplier's own invoices for
+# the order - each billed in Xero on its own instead of one bill for the whole order:
+#   [{"number": "93100001", "date": "2026-10-24", "due_date": "2026-11-23",
+#     "lines": [{"line": <PurchaseOrderLineItem pk>, "quantity": "40"}],
+#     "extra": [{"description": "Mouser fee TARIFF", "amount": "3.20"}], ...}]
+SUPPLIER_INVOICES_KEY = 'supplier_invoices'
+
+
+def bills_per_invoice(order):
+    """True when the order is billed per supplier invoice - the key is there, even before the first invoice."""
+    return SUPPLIER_INVOICES_KEY in ((getattr(order, 'metadata', None) or {}))
+
+
+def supplier_invoices(order):
+    return [inv for inv in (getattr(order, 'metadata', None) or {}).get(SUPPLIER_INVOICES_KEY) or []
+            if isinstance(inv, dict) and inv.get('number')]
+
+
 # Line fields that can be sent back to Xero when preserving a Xero-only line
 WRITABLE_LINE_KEYS = (
     'LineItemID', 'Description', 'Quantity', 'UnitAmount', 'ItemCode',

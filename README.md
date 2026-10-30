@@ -201,6 +201,19 @@ Each link stores the Xero line IDs that InvenTree owns. Everything else on the X
 - When the PO completes, the bill gets *Bill status when PO complete* (Draft by default), and the Xero PO is marked **Billed**.
 - After the bill is approved in Xero, InvenTree stops changing it. Payments still come back to the PO panel.
 - *Link bills entered in Xero*: a bill keyed in Xero whose reference contains an InvenTree PO number is linked to that PO. InvenTree shows it but never edits it.
+- The bill's **Reference** in Xero is the PO number and supplier reference (sent as the bill's `InvoiceNumber`, which is what Xero shows as a bill's Reference).
+
+### One bill per supplier invoice
+
+A supplier that ships an order in several boxes sends an invoice with each, on its own date. When a purchase order carries `metadata['supplier_invoices']` (the Mouser plugin, [inventree-mouser](https://github.com/SXSLYDA/inventree-mouser), sets it on every Mouser order and fills it as each box is received by its invoice), the order is billed **per supplier invoice** instead of once:
+
+- one ACCPAY bill per invoice, sent once that invoice is recorded (received) - with *Create bills* set to either "as received" or "when completed"; Off is still off;
+- dated the invoice date, due on the invoice's due date (else *Bill due (days)*), and the supplier's invoice number as the bill's Reference;
+- only the lines and quantities on that invoice, at the purchase order's prices, plus the fees recorded with that invoice (not the PO's extra lines); tax from *Purchase tax type*, so GST is on each bill;
+- each bill's status, payments and holds are tracked on its own and shown in a table on the PO's Xero panel; one that's held or fails doesn't stop the others;
+- the Xero PO is marked Billed once the PO is complete and every invoice has its bill;
+- stock received outside an invoice (e.g. with Receive Items) isn't billed - the panel lists it; a bill keyed in Xero with the supplier's invoice number is linked to that invoice (*Link bills entered in Xero*);
+- an order that already has a whole-order bill isn't billed per invoice as well - the panel says so.
 
 ## Web shop (inventree-woocommerce)
 
@@ -317,6 +330,17 @@ order.metadata['xero']          # id, number, status, url, total, amount_due, am
 company.metadata['xero']        # contact_id, url, balance{receivable_outstanding, receivable_overdue,
                                 #                          payable_outstanding, payable_overdue, updated}
 part.metadata['xero']           # item_id, item_code, url
+```
+
+Read by this plugin, written by others - bill a purchase order per supplier invoice:
+
+```python
+order.metadata['supplier_invoices'] = [   # present (even empty) = bill per invoice; each entry = one bill
+    {'number': '93170001', 'date': '2026-10-24', 'due_date': '2026-11-23',
+     'lines': [{'line': <PurchaseOrderLineItem pk>, 'quantity': '40'}],
+     'extra': [{'description': 'Freight', 'amount': '12.50'}]},
+]
+order.metadata['xero']['bills']   # {invoice number: link (id, number, status, url, total, amount_due, ...)}
 ```
 
 Events fired (needs *Event integration*):
