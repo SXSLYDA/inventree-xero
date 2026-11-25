@@ -101,6 +101,8 @@ sudo inventree-xero-update            # newest release; or: sudo inventree-xero-
 
 It backs up the database, points the `inventree-xero` line in `plugins.txt` at the release tag (`inventree-xero @ git+https://github.com/SXSLYDA/inventree-xero.git@vX.Y.Z`), runs `invoke update` (install, migrations, static files), restarts InvenTree, confirms the installed version and runs the configuration check. `sudo inventree-xero-update --check-only` shows what's installed and what's newest without changing anything.
 
+**From PyPI:** add `inventree-xero` (or pin a version, e.g. `inventree-xero==1.5.1`) to `plugins.txt`, then run `invoke update` and restart. The update script above still pins to GitHub tags.
+
 **Docker:** add `inventree-xero @ git+https://github.com/SXSLYDA/inventree-xero.git@vX.Y.Z` (the newest release tag) to `plugins.txt` in your data volume, then run `invoke update` and restart the containers. To update, change the tag and repeat.
 
 **Manual / development:** run `pip install -e .` inside InvenTree's virtualenv, then `invoke migrate` and `invoke static`.

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# inventree-omg-update - update the OMG InvenTree plugin on an InvenTree server (package installer)
+# inventree-xero-update - update the Xero InvenTree plugin (inventree-xero) on an InvenTree server (package installer)
 #
 # Install once on the server:
-#   sudo curl -fsSL -o /usr/local/bin/inventree-omg-update \
-#        https://raw.githubusercontent.com/SXSLYDA/inventree_omg_plugin/master/tools/server-update.sh
-#   sudo chmod +x /usr/local/bin/inventree-omg-update
+#   sudo curl -fsSL -o /usr/local/bin/inventree-xero-update \
+#        https://raw.githubusercontent.com/SXSLYDA/inventree-xero/main/tools/server-update.sh
+#   sudo chmod +x /usr/local/bin/inventree-xero-update
 #
 # Use:
-#   sudo inventree-omg-update                 # newest release tag on GitHub
-#   sudo inventree-omg-update v0.2.1          # a specific release
-#   sudo inventree-omg-update --check-only    # show installed / pinned / newest, change nothing
-#   sudo inventree-omg-update v0.2.0 --allow-downgrade   # roll back (read the warning)
+#   sudo inventree-xero-update                 # newest release tag on GitHub
+#   sudo inventree-xero-update v0.2.1          # a specific release
+#   sudo inventree-xero-update --check-only    # show installed / pinned / newest, change nothing
+#   sudo inventree-xero-update v0.2.0 --allow-downgrade   # roll back (read the warning)
 #
 # What it does:
 #   1. Finds plugins.txt (from /etc/inventree/config.yaml) and the release tag to install.
 #   2. Backs up the database (inventree run invoke backup) and plugins.txt.
-#   3. Points the inventree-omg-harness-import line in plugins.txt at that tag (adds it if missing).
+#   3. Points the inventree-xero line in plugins.txt at that tag (adds it if missing).
 #   4. Runs "inventree run invoke update" (installs it, runs migrations, static files).
 #   5. Restarts InvenTree and confirms the installed version matches the tag.
 # If the update fails, plugins.txt is put back and it says how to reinstall the previous version.
@@ -25,8 +25,8 @@
 
 set -euo pipefail
 
-REPO="${OMG_PLUGIN_REPO:-https://github.com/SXSLYDA/inventree_omg_plugin.git}"
-PACKAGE="inventree-omg-harness-import"
+REPO="${XERO_PLUGIN_REPO:-https://github.com/SXSLYDA/inventree-xero.git}"
+PACKAGE="inventree-xero"
 # InvenTree's own virtualenv (package installer). "inventree run python3 -c '...'"
 # loses the quoting on the way through, so the version is read with that
 # venv's pip instead.

@@ -4,6 +4,13 @@ Add notes for the next release under **Unreleased** as you work. `build-and-bump
 
 ## Unreleased
 
+## 1.5.2 — 2026-11-25
+
+- Fixed `tools/server-update.sh`: it was a copy of the OMG plugin's script and updated `inventree-omg-harness-import` from the OMG repo instead of this plugin
+- Published to PyPI: release tags are now also built and uploaded to PyPI (trusted publishing) after all tests pass; install with `inventree-xero` in plugins.txt
+- CI builds the package and runs `twine check` on every push
+- Packaging: licence declared in the current SPDX form (no more setuptools deprecation warnings)
+
 ## 1.5.1 — 2026-10-30
 
 - **One bill per supplier invoice.** A purchase order with `metadata['supplier_invoices']` (set by the Mouser plugin on Mouser orders and filled as each box is received by its invoice) is billed per invoice instead of once: each bill is dated the invoice date, due on its due date, has the supplier's invoice number as its Reference, and holds only that invoice's lines and quantities (at the PO's prices) and the fees recorded with it. Each bill is sent once its invoice is recorded, and its status, payments, holds and errors are kept on their own (`metadata['xero']['bills']`) and shown in a table on the PO's Xero panel; the Xero PO is marked Billed once the PO is complete and every invoice is billed. Stock received outside an invoice isn't billed and is listed on the panel. A bill keyed in Xero with the supplier's invoice number is linked to that invoice (*Link bills entered in Xero*). *Unlink bill* removes these links too. No new settings or migrations.
