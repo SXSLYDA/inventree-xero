@@ -136,7 +136,7 @@ jobs:
             echo "Release $TAG already exists - leaving it as it is."
             exit 0
           fi
-          gh release create "$TAG" --title "inventree-xero $TAG" --notes-file notes.md --verify-tag --latest=auto
+          gh release create "$TAG" --title "inventree-xero $TAG" --notes-file notes.md --verify-tag
 
   # A release tag: build that tag and publish it to PyPI (trusted publishing - no token).
   # One-time setup: a "pypi" environment in this repo, and a trusted publisher on pypi.org

@@ -4,6 +4,8 @@ Add notes for the next release under **Unreleased** as you work. `build-and-bump
 
 ## Unreleased
 
+- Fixed the GitHub release step in CI: `--latest=auto` isn't a valid `gh release create` option, so the release failed after the tests passed. GitHub now picks the latest release itself (its default).
+
 ## 1.5.2 — 2026-11-25
 
 - Fixed `tools/server-update.sh`: it was a copy of the OMG plugin's script and updated `inventree-omg-harness-import` from the OMG repo instead of this plugin
